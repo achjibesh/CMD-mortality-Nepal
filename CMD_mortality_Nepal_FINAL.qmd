@@ -71,7 +71,7 @@ conflicts_prefer(kableExtra::footnote)
 
 
 # data loading
-id   <- read.csv("D:/khoj_nso/data/prov dist id.csv")      |> data.table()
+id   <- read.csv("prov dist id.csv")      |> data.table()
 
 ddt <- read_dta("D:/khoj_nso/data/cen2021/SampleData2021/SampleData2021/Data/PCMS2021_Deceased.dta"
                 ) %>% mutate(across(where(is.labelled), as_factor)) %>%
@@ -208,19 +208,17 @@ final.dt <- copy(final.dt)[, agegrp := fcase(
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
-xx   <- readxl::read_xlsx("../Adult mortality/migration_data.xlsx") |> data.table()
+xx   <- readxl::read_xlsx("migration_data.xlsx") |> data.table()
 
 nmrdt <- xx[id, on = .(dname_nso == dname),
             `:=`(dist = i.dist, prov = i.prov, provname = i.provname)
            ][, `net-mig-rate` := round(`net-mig-rate`, 2) # nmr = (net-migrants / native pop) * 1000
            ][, .(dname_connect, dname_nso, `net-mig-rate`)]
 
-ltdt        <- read_xlsx("../Adult mortality/literacy.xlsx")     |> select(r_name, lt)  |> data.table()
-popdensity  <- read_xlsx("../Adult mortality/pop density.xlsx")  |> data.table()
-povdt       <- read_xlsx("../Adult mortality/poverty.xlsx")      |> data.table()
-#srdt        <- read_xlsx("../Adult mortality/sex ratio.xlsx")    |> data.table()
-urpop <- read.csv("../Adult mortality/urban pop dist.csv") |> select(r_name, urb_per) |> data.table()
-# xdt  <- merge(merge(merge(merge(ltdt, popdensity), povdt), srdt), urpop)
+ltdt        <- read_xlsx("literacy.xlsx")     |> select(r_name, lt)  |> data.table()
+popdensity  <- read_xlsx("pop density.xlsx")  |> data.table()
+povdt       <- read_xlsx("poverty.xlsx")      |> data.table()
+urpop       <- read.csv("urban pop dist.csv") |> select(r_name, urb_per) |> data.table()
 
 xdt  <- merge(merge(merge( povdt, urpop), popdensity), ltdt)
 xxdt <- merge(nmrdt, xdt, by.x = "dname_connect", by.y = "r_name", all.x = TRUE
@@ -570,7 +568,7 @@ cause_death <- read.csv("DeathByCauseOfDeath.csv") %>%
   data.table()
 
 
-tot.pop <- read.csv("D:/khoj_nso/data/cen2021/2021 dist pop.csv") %>% 
+tot.pop <- read.csv("2021 dist pop.csv") %>% 
   group_by(dist) %>% 
   summarise(pop = sum(total), .groups = "drop") %>% data.table()
 
