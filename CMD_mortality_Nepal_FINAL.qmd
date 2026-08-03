@@ -669,7 +669,7 @@ deathdt <- copy(dt)[,q05 := as.numeric(h15age)][, agegrp := fcase(
   ][, setnames(.SD, "h15sex", "sex")
   ][, cause := if_else(h15caud == "Communicable disease", "cmd", "others")
   ][, by = .(prov, dist, sex, dgub, agegrp, hh_edu, water_cat, toilet_cat, fuel_cat, cause),
-    .(deaths = sum(deaths))]
+    .(deaths = sum(deaths))] #
 
 cat_vars <- c("sex",  "agegrp", "dgub", "hh_edu", "water_cat", "toilet_cat")
 
