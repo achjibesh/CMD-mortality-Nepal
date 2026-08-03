@@ -1,0 +1,1793 @@
+---
+title: "Socioeconomic and Demographic Determinants of Communicable Disease Mortality in Nepal: Evidence from a Multilevel Analysis of the 2021 Census"
+running-head: "Determinants of Communicable Disease Mortality in Nepal"
+author:
+  - name: "Jibesh Acharya"
+    corresponding: true
+    affiliations:
+      - name: "Population and Statistics Research Hub (PSR HUB), Nepal"
+    email: "acharyajibesh@gmail.com"
+    orcid: "0000-0001-7261-7729"
+  - name: "Samir KC"
+    affiliations:
+      - name: "Population and Statistics Research Hub (PSR HUB), Nepal"
+format:
+  html:
+    mainfont: "Times New Roman"
+    toc: true
+    fig-width: 6
+    fig-height: 4
+  docx:
+    fig-width: 6
+    fig-height: 4
+    number-sections: false
+  pdf:
+    documentclass: article
+    geometry: margin=1in
+    mainfont: "Times New Roman"
+    pdf-engine: xelatex
+    fig-width: 6
+    fig-height: 4
+    number-sections: false
+    colorlinks: true
+crossref:
+  fig-title: "Fig."
+  fig-prefix: "Fig."
+  tbl-title: "Table"
+  tbl-prefix: "Table"
+bibliography: references_cmd.bib
+csl: bmc-public-health.csl
+citeproc: true
+link-citations: true
+lang: en
+date-format: long
+---
+
+```{r setup}
+#| label: setup
+#| include: false
+
+# ── Packages ──────────────────────────────────────────────────────────────────
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  data.table, tidyverse, glmmTMB, DHARMa,
+  performance, broom.mixed, ggeffects, dplyr,
+  modelsummary, kableExtra, patchwork, haven,
+  corrplot, gtsummary, pscl, MASS, flextable, ggspatial,
+  officer, RColorBrewer, viridis, scales, purrr,
+   MuMIn, forcats, cowplot, tmap, sf, conflicted, readxl
+)
+options(scipen = 9999)
+comma_format <- function(x) {
+  scales::comma(x, accuracy = 1)
+}
+
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::rename)
+conflicts_prefer(dplyr::first)
+conflicts_prefer(readxl::read_xlsx)
+conflicts_prefer(kableExtra::footnote)
+
+
+# data loading
+id   <- read.csv("D:/khoj_nso/data/prov dist id.csv")      |> data.table()
+
+ddt <- read_dta("D:/khoj_nso/data/cen2021/SampleData2021/SampleData2021/Data/PCMS2021_Deceased.dta"
+                ) %>% mutate(across(where(is.labelled), as_factor)) %>%
+  mutate(across(where(is.factor), as.character), deceased_wt = as.numeric(deceased_wt)) %>% 
+  mutate(deaths := deceased_wt * 198463 / sum(deceased_wt)) %>% 
+  dplyr::filter(h15age != "Not Reported") %>% 
+  data.table()
+
+hhdt <- read_dta("D:/khoj_nso/data/cen2021/SampleData2021/SampleData2021/Data/PCMS2021_Household.dta"
+                 ) %>% mutate(across(where(is.labelled), as_factor)) %>% data.table()
+hhdt <- hhdt[, wqnt := if_else(wqnt %in% c("Lowest", "Lower"), "Low",
+                          if_else(wqnt %in% c("Higher", "Highest"), "High", "Middle"))]
+
+indidt1 <- read_dta("D:/khoj_nso/data/cen2021/SampleData2021/SampleData2021/Data/PCMS2021_Individual.dta"
+                 ) %>% mutate(across(where(is.labelled), as_factor)) %>% data.table()
+indidt1 <- indidt1[hhdt, on = .(hhid), `:=` (water = i.h06, toilet = i.h09, fuel = i.h07)
+                   ][, q17:= fifelse(q16=="Never attended for study", "No education", as.character(q17))]
+
+
+# household-level education
+
+edu_levels <- c("No education",
+  "No level/Level not stated", "Others", "Don't know", "Not reported",
+  "Nursery/K.G./Kindergarden", "Class 1", "Class 2", "Class 3", "Class 4", "Class 5", "Class 6", "Class 7", "Class 8",
+  "Class 9", "Class 10 (Test Pass)", "SLC/SEE", "10+2 or equivalent",
+  "Bachelor degree or equivalent",  "Master degree or equivalent", "Ph.D.")
+
+
+
+indidt2 <- copy(indidt1)[, edu_score := fifelse(is.na(
+  match(as.character(q17), edu_levels)), 0L,
+  match(as.character(q17), edu_levels))]
+
+hh_edu <- indidt2[, by = .(hhid), .(edu_score = max(edu_score))]
+
+hh_edu[, edu_high := edu_levels[fifelse(edu_score == 0L, NA_integer_, edu_score)]
+][, hh_edu_cat := fcase(
+  is.na(edu_high), "Not stated",
+  edu_high %in% c("No education"), "No education",
+  edu_high %in% c("No level/Level not stated", "Others", "Don't know", "Not reported"), "Not stated",
+  edu_high %in% c("Nursery/K.G./Kindergarden", "Class 1", "Class 2", "Class 3", "Class 4", "Class 5"), "Primary",
+  edu_high %in% c("Class 6", "Class 7", "Class 8"), "Lower secondary",
+  edu_high %in% c("Class 9", "Class 10 (Test Pass)", "SLC/SEE", "10+2 or equivalent", 
+  "Bachelor degree or equivalent", "Master degree or equivalent", "Ph.D."), "Secondary and above",
+  default = "Not stated"
+)]
+
+
+# bring household edu to deathdt
+ddt <- ddt[hh_edu, on = "hhid", hh_edu:= i.hh_edu_cat
+][, wqnt := if_else(wqnt %in% c("Lowest", "Lower"), "Low",
+                          if_else(wqnt %in% c("Higher", "Highest"), "High", "Middle"))]
+
+
+
+indidt <- copy(indidt1)[,q05 := as.numeric(q05)][, agegrp := fcase(
+    q05 <= 4,  "0-4",    q05 <= 14, "5-14",
+    q05 <= 24, "15-24",    q05 <= 34, "25-34",
+    q05 <= 44, "35-44",    q05 <= 54, "45-54",
+    q05 <= 64, "55-64", q05 <= 74, "65-74", 
+    default    = "75+")
+  ][, pop := individual_wt * 29164578 / sum(individual_wt)
+  
+  ][, wqnt := if_else(wqnt %in% c("Lowest", "Lower"), "Low",
+                         if_else(wqnt %in% c("Higher", "Highest"), "High", "Middle"))
+  
+  ][, water_cat := fcase( water %in% c("Tap/piped (within compound)", "Tap/piped (outside compound)", "Tube well/hand pump",
+                                       "Covered well/kuwa", "Jar/bottle"), "Safe",
+                          water %in% c("Uncovered well/kuwa", "Spout water", "Others", "River/stream"), "Unsafe",
+                          default = "Not Available source")
+               
+  ][, toilet_cat := fcase(toilet %in% c("Flush toilet connected to public sewerage",
+                                               "Flush toilet connected to septic tank",
+                                               "Ordinary toilet"), "Improved", 
+                          toilet %in% c("Public toilet", "No toilet"), "Unimproved", 
+                          default = "Not Available toilet")
+  
+  ][, fuel_cat := fcase(fuel %in% c("LPG", "Electricity", "Biogas"), "Clean",
+                        fuel %in% c("Wood/firewood", "Cow dung", "Kerosene", "Others"), "Polluting", 
+                        default = "Not available fuel")
+  
+  ][,setnames(.SD, c("q04"), c("sex"))
+  ][hh_edu, on = "hhid", hh_edu:= i.hh_edu_cat
+    ][, by= .(prov, dist, dgub, #wqnt, 
+    sex, agegrp, hh_edu, water_cat, toilet_cat, fuel_cat), .(pop = sum(pop))]
+
+
+
+
+dt <- merge(ddt, hhdt, by = c("hhid", "prov", "dist", "mnid", "mntp", "mncl", "dgub", "ecob" #, "wqnt"
+), all.x = T)
+sel_vars <-  c("prov", "dist", "dgub", "ecob", #"wqnt", 
+"h15sex", "h15age", "h15caud","hh_edu", "h06","h07", "h09" ,"deaths")
+
+final.dt <- dt %>%
+  dplyr::select(all_of(sel_vars)) %>%
+  dplyr::rename(sex = h15sex, age = h15age, cause  = h15caud, water = h06, toilet = h09, fuel = h07) %>% 
+  data.table()
+
+final.dt <- copy(final.dt)[, agegrp := fcase(
+    age %in% 0:4,  "0-4",
+    age %in% 5:14, "5-14",
+    age %in% 15:24, "15-24",
+    age %in% 25:34, "25-34",
+    age %in% 35:44, "35-44",
+    age %in% 45:54, "45-54",
+    age %in% 55:64, "55-64",
+    age %in% 65:74, "65-74",
+    default    = "75+"
+  )][, cause := if_else(cause == "Communicable disease", "cmd", "others")
+   
+   ][, water_cat := fcase( water %in% c("Tap/piped (within compound)", "Tap/piped (outside compound)", "Tube well/hand pump",
+                                       "Covered well/kuwa", "Jar/bottle"), "Safe",
+                          water %in% c("Uncovered well/kuwa", "Spout water", "Others", "River/stream"), "Unsafe",
+                          default = "Not Available source")
+               
+  ][, toilet_cat := fcase(toilet %in% c("Flush toilet connected to public sewerage",
+                                               "Flush toilet connected to septic tank",
+                                               "Ordinary toilet"), "Improved", 
+                          toilet %in% c("Public toilet", "No toilet"), "Unimproved", 
+                          default = "Not Available toilet")
+  
+  ][, fuel_cat := fcase(fuel %in% c("LPG", "Electricity", "Biogas"), "Clean",
+                        fuel %in% c("Wood/firewood", "Cow dung", "Kerosene", "Others"), "Polluting", 
+                        default = "Not available fuel")
+  
+  ][, by= .(prov, dist, #wqnt, 
+  sex, dgub, agegrp, cause, hh_edu, water_cat, toilet_cat, fuel_cat), .(deaths = sum(deaths))
+               ][indidt, on = .(prov, dist, #wqnt, 
+               dgub, sex, agegrp, hh_edu, water_cat, toilet_cat, fuel_cat), `:=`(pop = i.pop)
+                 ][is.na(pop), pop:=1][id, on=.(dist = dname_s_data), dcode:= i.dist]
+
+
+
+
+# ── Data loading ──────────────────────────────────────────────────────────────
+xx   <- readxl::read_xlsx("../Adult mortality/migration_data.xlsx") |> data.table()
+
+nmrdt <- xx[id, on = .(dname_nso == dname),
+            `:=`(dist = i.dist, prov = i.prov, provname = i.provname)
+           ][, `net-mig-rate` := round(`net-mig-rate`, 2) # nmr = (net-migrants / native pop) * 1000
+           ][, .(dname_connect, dname_nso, `net-mig-rate`)]
+
+ltdt        <- read_xlsx("../Adult mortality/literacy.xlsx")     |> select(r_name, lt)  |> data.table()
+popdensity  <- read_xlsx("../Adult mortality/pop density.xlsx")  |> data.table()
+povdt       <- read_xlsx("../Adult mortality/poverty.xlsx")      |> data.table()
+#srdt        <- read_xlsx("../Adult mortality/sex ratio.xlsx")    |> data.table()
+urpop <- read.csv("../Adult mortality/urban pop dist.csv") |> select(r_name, urb_per) |> data.table()
+# xdt  <- merge(merge(merge(merge(ltdt, popdensity), povdt), srdt), urpop)
+
+xdt  <- merge(merge(merge( povdt, urpop), popdensity), ltdt)
+xxdt <- merge(nmrdt, xdt, by.x = "dname_connect", by.y = "r_name", all.x = TRUE
+             )[id, on = .(dname_nso = dname), dcode := i.dist][order(dcode)]
+
+
+workdt <- merge(final.dt, xxdt, by = "dcode", all.x = TRUE)[is.na(pop), pop := 1
+][prov == "Sudurpashchim", prov:= "Sudurpaschim"][id, on = .(prov = provname), `:=` (prov = i.prov, provname = i.provname)]
+
+# ── Analysis data frame ───────────────────────────────────────────────────────
+df <- workdt |>
+  mutate(
+    sex    = factor(sex,    levels = c("Male", "Female")),
+    agegrp = factor(agegrp, levels = c("0-4", "5-14", "15-24", "25-34", "35-44", "45-54", "55-64", "65-74", "75+")),
+    
+    # wqnt   = factor(wqnt,   levels = c("Lowest", "Lower", "Middle", "Higher", "Highest")),
+    #wqnt = factor(wqnt, levels = c("Low", "Middle", "High")),
+    dgub = factor(dgub, levels = c("Rural", "Urban", "Peri-urban")),
+    hh_edu = factor(hh_edu, levels = c("No education", "Primary", "Lower secondary", "Secondary and above", "Not stated")),
+    water_cat = factor(water_cat, levels = c("Safe", "Unsafe", "Bottled", "Not Available source")),
+    toilet_cat = factor(toilet_cat, levels = c("Improved", "Unimproved", "Not Available toilet")),
+    fuel_cat = factor(fuel_cat, levels = c("Clean", "Polluting", "Not Available fuel")),
+    
+    nmr_std        = as.numeric(scale(`net-mig-rate`)),
+    pov_std        = as.numeric(scale(pov)),
+    urb_per_std        = as.numeric(scale(urb_per)),
+    lt_std        = as.numeric(scale(lt)),
+    density_std = as.numeric(scale(density)),
+    log_pop        = log(pop),
+    district       = factor(dcode),
+    province       = factor(provname)
+  )
+
+dist_lookup <- unique(workdt[, .(dcode, dname_connect)])
+
+# ── Helper functions ──────────────────────────────────────────────────────────
+
+# Extracts variance components from the conditional (count) part of the model
+get_sd <- function(model) {
+  vc <- VarCorr(model)$cond
+  prov_sd <- if ("province" %in% names(vc)) sqrt(as.numeric(vc$province)) else NA
+  dist_sd <- if ("district:province" %in% names(vc)) sqrt(as.numeric(vc$`district:province`)) else NA
+  c(prov_sd, dist_sd)
+}
+
+# Computes Intraclass Correlation Coefficients
+get_icc <- function(model) {
+  vc <- VarCorr(model)$cond
+  vp <- as.numeric(vc$province)
+  vd <- as.numeric(vc$`district:province`)
+  vr <- (pi^2) / 3
+  vt <- vp + vd + vr
+  data.frame(ICC_province = vp / vt, ICC_district = vd / vt)
+}
+
+# Computes Incidence Rate Ratios with CI
+get_irr <- function(model, term) {
+  tt <- tryCatch(
+    tidy(model, effects = "fixed", component = "cond",
+         conf.int = TRUE, exponentiate = TRUE),
+    error = function(e) NULL
+  )
+  if (is.null(tt)) return("—")
+  row <- tt[tt$term == term, ]
+  if (nrow(row) == 0) return("—")
+  stars <- ifelse(row$p.value < 0.001, "***",
+           ifelse(row$p.value < 0.01,  "**",
+           ifelse(row$p.value < 0.05,  "*",
+           ifelse(row$p.value < 0.1,   "†", ""))))
+  sprintf("%.2f (%.2f–%.2f)%s", row$estimate, row$conf.low, row$conf.high, stars)
+}
+
+# Gets full list of IRR
+get_irr_row <- function(model, term) {
+  tt <- tryCatch(
+    tidy(model, effects = "fixed", component = "cond",
+         conf.int = TRUE, exponentiate = TRUE),
+    error = function(e) NULL
+  )
+  if (is.null(tt)) return(list(est=NA, lo=NA, hi=NA, p=NA, cell="—"))
+  row <- tt[tt$term == term, ]
+  if (nrow(row) == 0) return(list(est=NA, lo=NA, hi=NA, p=NA, cell="—"))
+  stars <- ifelse(row$p.value < 0.001, "***",
+           ifelse(row$p.value < 0.01,  "**",
+           ifelse(row$p.value < 0.05,  "*",
+           ifelse(row$p.value < 0.1,   "†", ""))))
+  cell <- sprintf("%.2f (%.2f–%.2f)%s", row$estimate, row$conf.low, row$conf.high, stars)
+  list(est=row$estimate, lo=row$conf.low, hi=row$conf.high, p=row$p.value, cell=cell)
+}
+
+# ── Manuscript theme ──────────────────────────────────────────────────────────
+theme_manuscript <- theme_classic(base_size = 11, base_family = "serif") +
+  theme(
+    plot.title    = element_text(size = 12, face = "bold",  hjust = 0),
+    plot.subtitle = element_text(size = 10, colour = "grey40"),
+    axis.text     = element_text(size = 9),
+    axis.title    = element_text(size = 10),
+    legend.text   = element_text(size = 9),
+    legend.title  = element_text(size = 9,  face = "bold"),
+    plot.caption  = element_text(size = 8,  colour = "grey50", hjust = 0),
+    strip.text    = element_text(size = 9,  face = "bold"),
+    axis.text.x = element_text(angle = 30)
+  )
+theme_set(theme_manuscript)
+
+library(conflicted)
+
+conflicted::conflict_prefer("select", "dplyr")
+conflicted::conflict_prefer("filter", "dplyr")
+conflicted::conflict_prefer("rename", "dplyr")
+```
+
+# Abstract
+
+**Background:** Communicable disease mortality has declined in Nepal, but residual mortality may remain concentrated among vulnerable demographic groups and households with adverse living conditions. Evidence on the simultaneous individual, household, and district-level determinants of communicable disease mortality is limited.
+
+**Methods:** We conducted a cross-sectional multilevel analysis using the 2021 National Population and Housing Census of Nepal. The outcome was the number of communicable disease deaths in demographic strata defined by district, sex, age group, residence, household education, drinking water source, and toilet facility. Exposure populations were derived from weighted census individual records. Sequential multilevel negative binomial models with district random intercepts were fitted to estimate incidence rate ratios (IRRs) and 95% confidence intervals (CIs).
+
+**Results:** Of 198,463 deaths recorded in the census, 25,049 were attributed to communicable diseases, corresponding to 12.62% of all deaths and 85.89 deaths per 100,000 population. CMD mortality varied across provinces and districts, with district rates ranging from 49 to 336 deaths per 100,000 population. The final model identified lower mortality among females than males (IRR: 0.78; 95% CI: 0.64-0.95), and higher mortality among adults aged 65-74 years (IRR: 3.16; 95% CI: 2.11-4.72) and 75 years and above (IRR: 5.76; 95% CI: 3.86-8.60) compared with children aged 0-4 years. Household education was strongly protective, while urban residence (IRR: 2.77; 95% CI: 2.12-3.63), unsafe drinking water (IRR: 11.21; 95% CI: 8.11-15.50), and unimproved sanitation (IRR: 6.86; 95% CI: 4.80-9.81) were associated with higher mortality. District-level poverty, net migration, urbanisation, and population density were not independently associated after adjustment.
+
+**Conclusions:** Communicable disease mortality in Nepal is geographically clustered at the district level and strongly patterned by household environmental conditions, education, residence, age, and sex. Policies to reduce residual CMD mortality should prioritise household-level WASH improvements, district-level surveillance, and targeted outreach to biologically and socially vulnerable groups.
+
+**Keywords:** communicable disease mortality; Nepal; census; multilevel modelling; WASH; health inequality
+
+# Background
+
+Communicable diseases remain a major cause of mortality in low- and middle-income countries. Although the global burden of infectious diseases has declined, communicable diseases continue to disproportionately affect socially disadvantaged populations and contribute substantially to premature mortality, particularly in Asian and African countries [@who_stat; @GBD2021Causes].
+
+Nepal has experienced a marked epidemiological transition during the past three decades. In the early 1990s, communicable diseases, maternal disorders, neonatal conditions, and nutritional deficiencies accounted for the majority of deaths in the country. Since then, considerable improvements in socioeconomic conditions, expansion of primary healthcare services, increased immunisation coverage, improved sanitation, and better access to safe drinking water have contributed to substantial reductions in communicable disease burden [@NGBD2021; @mishraNepal2025]. Nepal has achieved notable successes in communicable disease control, including certification as a polio-free country in 2014 and significant progress towards the elimination of measles, malaria, and visceral leishmaniasis (kala-azar). Disease-specific control programmes targeting tuberculosis, diarrhoeal diseases, malaria, and vaccine-preventable diseases have further accelerated these gains [@ahr2080].
+
+Despite these achievements, communicable diseases continue to represent an important public health challenge in Nepal. Estimates from the Global Burden of Disease Study indicate that communicable, maternal, neonatal, and nutritional conditions still accounted for approximately one-fifth of all deaths in Nepal in 2019 [@NGBD2021; @GBD2021Causes]. Tuberculosis remains endemic, with an estimated 416 cases per 100,000 population in the national prevalence survey [@tb2018]. In recent years, several infectious diseases, including dengue fever, scrub typhus, and seasonal influenza, have also re-emerged, posing new challenges for disease surveillance and control [@bhandariDengue2025; @WHOCCSNepal2023].
+
+The persistence of communicable diseases alongside a rapidly increasing burden of non-communicable diseases reflects Nepal's ongoing epidemiological transition and the coexistence of a "double burden" of disease. This transition is closely linked with broader demographic and socioeconomic changes, including population ageing, urbanisation, migration, educational expansion, and economic development [@Gardner2022]. However, these transitions do not occur uniformly across populations. Socioeconomic position, demographic characteristics, and environmental conditions strongly influence exposure to infectious diseases, access to healthcare, and health outcomes, resulting in persistent inequalities in mortality [@naidoo2024].
+
+Geographic and socioeconomic disparities are particularly pronounced in Nepal because of its substantial ecological, socioeconomic, and infrastructural heterogeneity. Provinces and districts differ considerably in poverty levels, urbanisation, healthcare accessibility, sanitation coverage, and population mobility. Previous studies have documented substantial subnational inequalities in health outcomes across ecological belts, provinces, and districts [@Gardner2022; @NGBD2021]. Consequently, aggregate national progress in communicable disease control may conceal important within-country disparities, with certain population groups and geographic areas continuing to experience disproportionately high mortality burdens.
+
+Recognising these challenges, Nepal has incorporated communicable disease control within both national and global policy frameworks. Under the Sustainable Development Goals (SDGs), Nepal has committed to achieving SDG target 3.3, which aims to end the epidemics of AIDS, tuberculosis, malaria, neglected tropical diseases, and other communicable diseases by 2030 [@sdg_report; @who_stat]. Similarly, the Nepal Health Sector Strategic Plan 2023–2030 and the WHO Nepal Country Cooperation Strategy 2023–2027 prioritise strengthened disease surveillance, epidemic preparedness, antimicrobial stewardship, and equitable access to essential health services [@health_strategy; @WHOCCSNepal2023]. However, persistent gaps in case detection, surveillance, and the underlying socioeconomic determinants of health continue to threaten progress towards these targets.
+
+Generating evidence to address these challenges requires understanding not only national trends in communicable disease mortality, but also the multilevel determinants that shape its uneven distribution across populations and places. Previous studies in Nepal have largely relied on household surveys, disease-specific surveillance systems, or aggregate national estimates, limiting their ability to simultaneously examine individual, household, and contextual determinants of mortality [@Gardner2022; @NGBD2021]. The National Population and Housing Census (NPHC) 2021 offers a unique opportunity to address these limitations by capturing deaths occurring both within and outside health facilities alongside comprehensive socioeconomic information for the entire population. Applying a multilevel analytical framework to these census data enables simultaneous examination of demographic, household, and district-level determinants while quantifying residual geographic variation in communicable disease mortality.
+
+Therefore, this study aimed to examine the socioeconomic and demographic determinants of communicable disease mortality in Nepal using data from the National Population and Housing Census 2021. Specifically, the study sought to: (i) describe the national and subnational distribution of communicable disease mortality; (ii) identify demographic and household-level predictors associated with communicable disease mortality; (iii) assess the contribution of district-level contextual factors to subnational variation in communicable disease mortality; and (iv) quantify the extent of unexplained between-district clustering using multilevel modelling.
+
+# Methods
+
+## Study Design, Setting, and Data Sources
+
+The study was based on a cross-sectional multilevel research design and is reported in accordance with the Strengthening the Reporting of Observational Studies in Epidemiology (STROBE) guidance where applicable [@vonElm2007STROBE]; a completed STROBE checklist is provided as an Additional file. The primary data source was the National Population and Housing Census (NPHC) 2021, the most recent census conducted in Nepal [@NPHC2021NationalReport]. The census recorded detailed information on the death of individuals during the 12 months preceding the census reference date (25 November 2021). The analytical unit was the demographic stratum. Each stratum represented a unique combination of district, sex, age group, place of residence, highest education level in the household, drinking water source, and toilet facility type. District-level poverty estimates were obtained from a small-area estimation study based on the Nepal Living Standard Survey and auxiliary information from the NPHC 2021 [@sae_report]. All district-level indicators were linked to the stratum-level dataset using district administrative codes.
+
+## Construction of the Analytic Dataset
+
+The unit of analysis was a demographic stratum. Strata were created by cross-classifying individuals according to district, sex, age group, place of residence, highest education level in the household, drinking water source, and toilet facility type.
+
+For each stratum, the total number of communicable disease deaths and the corresponding exposure population were obtained. Population exposure was derived from the census individual dataset using survey weights and aggregated to match the strata defined in the mortality dataset.
+
+## Outcome Variable
+
+The outcome was the number of communicable disease deaths within each stratum. Cause of death was ascertained through household reporting in the NPHC and classified as communicable disease or others.
+
+## Predictor Variables
+
+Predictors were grouped into three hierarchical levels.
+
+- **Individual level:** age group (0–4, 5–14, 15–24, 25–34, 35–44, 45–54, 55-64, 65-74, 75 years and above) and sex (Male and Female).
+- **Household level:** place of residence (Rural, Urban, Peri-urban), Highest education level in the household (No education, Primary, Lower secondary, Secondary and above), Drinking water source (Safe, Unsafe), and Toilet facility type (Improved, Unimproved)
+- **Community (District) level:** Net migration rate (net migrants per 1,000 native-born population), Poverty (%), Urban population (%), Population density (per sq.km), and Literacy (%).
+
+District-level continuous predictors were standardised to mean of 0, and a standard deviation of 1 before model fitting. Standardization facilitated model convergence and enabled comparison of effect sizes across variables.
+
+## Statistical Analysis
+
+### Assessment of Multilevel Structure
+
+Communicable disease mortality was modelled using multilevel negative binomial models. Before model fitting, the appropriate multilevel structure was evaluated by estimating two null (intercept-only) models. A **two-level model** with random intercepts for districts, and a **three-level model** with districts nested within provinces were used. In both models, the logarithm of the exposure population at risk was included as an offset to account for differences in population size.
+
+Akaike Information Criterion (AIC) was the primary metric for model selection. Bayesian Information Criterion (BIC) and log-likelihood were also reported as complementary measures of model fit. Intraclass correlation coefficients (ICCs) were calculated to quantify the proportion of unexplained geographic variation attributable to each hierarchical level. Following the latent-variable approach for generalized linear mixed models, the level-1 residual variance was approximated by $\pi^2/3$. Because the province-level variance component was negligible and did not improve model fit, the subsequent analyses were conducted using a **two-level multilevel negative binomial model** with district-specific random intercepts.
+
+### Sequential Model Building
+
+Following the selection of the hierarchical structure, a series of nested multilevel negative binomial models was estimated to examine the contribution of variables at different levels.
+
+- **Model 0 (M0):** Two-level null model including only a district-level random intercept
+- **Model 1 (M1):** M0 plus individual-level variables
+- **Model 2 (M2):** M1 plus household-level variables
+- **Model 3 (M3):** M2 plus district-level contextual variables
+
+The general model was specified as
+
+$$\log(\mu_{ij}) = \beta_0 + \mathbf{X}_{ij} \boldsymbol{\beta} + u_j + \log(pop_{ij}),$$
+
+where:
+
+- $\mu_{ij}$ denotes the expected number of communicable disease deaths for stratum $i$ in district $j$;
+- $\mathbf{X}_{ij}$ represents the vector of explanatory variables;
+- $u_j$ denotes the district-specific random intercept, assumed to follow a normal distribution with mean zero and variance $\sigma_u^2$; and
+- $pop_{ij}$ represents the exposure population included as an offset.
+
+Regression coefficients were exponentiated and explained as adjusted incidence rate ratios (IRRs) with 95% confidence intervals (CIs).
+
+### Model Evaluation
+
+Competing models were compared using the AIC, BIC, log-likelihood, and the change in AIC $(\Delta AIC)$. The magnitude of between-area heterogeneity was assessed using the estimated standard deviations of the random effects. The explanatory performance of each model was quantified using the marginal and conditional coefficients of determination $(R^2)$ following Nakagawa and Schielzeth. Marginal $R^2$ gives the proportion of variance explained by the fixed effects alone, whereas conditional $R^2$ represents the proportion explained jointly by the fixed and random effects.
+
+### Model Diagnostics
+
+The suitability of the negative binomial distribution was evaluated by comparing model fit with the null models and assessing the reduction in information criteria across successive models. Multicollinearity among explanatory variables was assessed using generalized variance inflation factors (GVIFs), with adjusted GVIF values examined for predictors with multiple degrees of freedom.
+
+All statistical analyses were conducted using **R** version `r getRversion()`. Multilevel negative binomial models were fitted using the **glmmTMB** package. Model performance statistics, including marginal and conditional $R^2$, were calculated using the **performance** package.
+
+# Results
+
+## Geographic Distribution of Communicable Disease Mortality
+
+### National-level variation
+
+```{r nepal_table}
+#| label: tbl-outcome
+#| tbl-cap: "Summary of Communicable Disease Mortality in Nepal, 2021"
+#| echo: false
+
+Total_Deaths <- 198463
+CMD_Deaths   <- 25049
+pop <- 29164578
+
+cmd_summary <- data.frame(
+  Total_Deaths = Total_Deaths,
+  CMD_Deaths   = CMD_Deaths,
+  CMD_Rate     = round((CMD_Deaths / sum(pop, na.rm = TRUE)) * 100000, 2),
+  CMD_Share    = round((CMD_Deaths / Total_Deaths) * 100, 2)
+)
+
+
+
+flextable(cmd_summary) |>
+  set_header_labels(
+    Total_Deaths = "Total deaths",
+    CMD_Deaths   = "CMD deaths",
+    CMD_Rate     = "CMD rate (per 100,000 pop.)",
+    CMD_Share    = "CMD share (%)"
+  ) |>
+  theme_booktabs() |>
+  autofit()
+
+```
+
+According to the NPHC 2021, `r comma_format(cmd_summary$CMD_Deaths)` of `r comma_format(cmd_summary$Total_Deaths)` deaths recorded in the census were attributable to communicable diseases. This corresponded to `r sprintf("%.2f", cmd_summary$CMD_Share)`% of all deaths and a national CMD mortality rate of `r sprintf("%.2f", cmd_summary$CMD_Rate)` deaths per 100,000 population (@tbl-outcome).
+
+### Provincial variation
+
+```{r prov_map}
+#| label: fig-prov-map-rate
+#| fig-cap: "Communicable disease mortality by province, Nepal, 2021."
+#| fig-width: 5
+#| fig-height: 5
+#| message: false
+#| warning: false
+#| echo: false
+
+prov.shp <- suppressWarnings(
+  suppressMessages(st_read("../Mortality Estimation/Map for mortality estimation/dist_prov_nep_local/province.shp", quiet = T)))
+dist.shp <- suppressWarnings(
+  suppressMessages(st_read("../Mortality Estimation/Map for mortality estimation/dist_prov_nep_local/dist_final.shp", quiet =T)))
+
+
+cause_death <- read.csv("DeathByCauseOfDeath.csv") %>% 
+  filter(agegrp ==0 & prov !=0 & dist ==0 & gapa ==0 & sex == 0) %>% 
+  dplyr::select(prov, provname, deaths = rowtotal, comm) %>% 
+  data.table()
+
+tot.pop <- read.csv("pop nep prov.csv") %>% 
+  pivot_longer(names_to = "provname", values_to = "pop", Nepal:Sudurpaschim) %>% 
+  group_by(provname) %>% 
+  summarise(pop = sum(pop), .groups = "drop") %>% filter(provname != "Nepal")%>% data.table()
+
+cmd_dt1 <- cause_death[,provname:=NULL][tot.pop[id, on=.(provname), prov:= i.prov], on =.(prov), `:=`(provname = i.provname, pop= i.pop)
+                      ][, `:=` (cmd_rate = round((comm / pop) * 100000), 
+                                  cmd_prop = round((comm / deaths) * 100))]
+
+
+prov.shp.mx <- merge(prov.shp, cmd_dt1, by.x = "fid", by.y = "prov")
+
+# Rate map
+# Rate map
+p1 <- ggplot(prov.shp.mx) +
+  geom_sf(aes(fill = cmd_rate), color = "black", linewidth = 0.2) +
+  geom_sf_text(
+    aes(label = paste0(provname, "\n", round(cmd_rate, 1))),
+    size = 2, fontface = "bold", lineheight = 0.9, color = "black") +
+  scale_fill_distiller(palette = "Reds", direction = 1, guide = "none") +
+  # annotation_scale(location = "bl", width_hint = 0.25) +
+  # annotation_north_arrow(location = "tr", which_north = "true", style = north_arrow_fancy_orienteering) +
+  theme_void() +
+  theme(plot.title = element_text(size = 9, hjust = 0.5),
+    panel.border = element_rect(color = "black", linewidth = 1, fill = NA ))
+
+
+
+# Proportion map
+
+p2 <- ggplot(prov.shp.mx) +
+  geom_sf(aes(fill = cmd_prop), color = "black", linewidth = 0.2) +
+  geom_sf_text(
+    aes(label = paste0(provname, "\n", round(cmd_prop, 1))),
+    size = 2, fontface = "bold", lineheight = 0.9, color = "black") +
+  scale_fill_distiller(palette = "Reds", direction = 1, guide = "none") +
+  # annotation_scale(location = "bl", width_hint = 0.25) +
+  # annotation_north_arrow(location = "tr", which_north = "true", style = north_arrow_fancy_orienteering) +
+  theme_void() +
+  theme(plot.title = element_text(size = 9, hjust = 0.5),
+    panel.border = element_rect(color = "black", linewidth = 1, fill = NA ))
+  
+  
+# Combine
+p1 <- p1 + labs(title = "A. Communicable disease mortality rate (per 100,000 population)")
+p2 <- p2 + labs(title = "B. Proportion of deaths due to CMD (% of total deaths)")
+
+cowplot::plot_grid(p1, p2, ncol = 1)
+
+
+
+#p1 + p2 + plot_layout(nrow = 2)
+
+```
+
+Marked provincial variation was observed in communicable disease mortality across Nepal (@fig-prov-map-rate). Bagmati recorded the highest CMD mortality rate (`r cmd_dt1$cmd_rate[cmd_dt1$prov ==3]` deaths per 100,000 population), followed by Lumbini (`r cmd_dt1$cmd_rate[cmd_dt1$prov ==5]`) and Gandaki (`r cmd_dt1$cmd_rate[cmd_dt1$prov ==4]`). Madhesh had the lowest rate (`r cmd_dt1$cmd_rate[cmd_dt1$prov ==2]` deaths per 100,000 population). In terms of the share of all deaths due to CMD, Karnali and Bagmati had the highest values (both 14%). Thus, although Karnali had a comparatively low CMD mortality rate, CMD accounted for a relatively large share of all deaths in the province.
+
+### District-level variation
+
+```{r dist_map}
+#| label: fig-map-rate
+#| fig-cap: "Communicable disease mortality by district, Nepal, 2021."
+#| fig-width: 5
+#| fig-height: 5
+#| message: false
+#| warning: false
+#| echo: false
+
+prov.shp <- suppressWarnings(
+  suppressMessages(st_read("../Mortality Estimation/Map for mortality estimation/dist_prov_nep_local/province.shp", quiet = T)))
+dist.shp <- suppressWarnings(
+  suppressMessages(st_read("../Mortality Estimation/Map for mortality estimation/dist_prov_nep_local/dist_final.shp", quiet =T)))
+
+
+
+cause_death <- read.csv("DeathByCauseOfDeath.csv") %>% 
+  filter(agegrp ==0 & prov !=0 & dist !=0 & gapa ==0 & sex == 0) %>% 
+  dplyr::select(dist, dname, deaths = rowtotal, comm) %>% 
+  data.table()
+
+
+tot.pop <- read.csv("D:/khoj_nso/data/cen2021/2021 dist pop.csv") %>% 
+  group_by(dist) %>% 
+  summarise(pop = sum(total), .groups = "drop") %>% data.table()
+
+
+cmd_dt <- cause_death[tot.pop, on =.(dist), `:=`(pop= i.pop)
+                      ][, `:=` (cmd_rate = round((comm / pop) * 100000), 
+                                  cmd_prop = round((comm / deaths) * 100))
+                        ][id, on = .(dist), DISTRICT:= i.DISTRICT]
+dist.shp.mx <- merge(dist.shp, cmd_dt, by = "DISTRICT")
+
+
+
+levels <- c("0–50","50–100","100–150", "150–200","200-250", "250+")
+
+dist.shp.mx$rate_class <- factor(cut(
+  dist.shp.mx$cmd_rate,
+  breaks = c(0, 50, 100, 150, 200, 250, Inf),
+  include.lowest = TRUE,
+  right = FALSE,
+  labels = levels
+))
+# Rate map
+p1 <- ggplot(dist.shp.mx) +
+  geom_sf(aes(fill = rate_class), color = "grey70", linewidth = 0.2) +
+  scale_fill_brewer(palette = "Reds", name = "Rate", drop = FALSE) +
+  geom_sf(data = prov.shp, fill = NA, color = "black", linewidth = 0.6) +
+  # annotation_scale(location = "bl", width_hint = 0.25) +
+  # annotation_north_arrow(location = "tr", which_north = "true", style = north_arrow_fancy_orienteering) +
+  theme_void()+
+  theme(plot.title = element_text(size = 9, hjust = 0.5),
+  panel.border = element_rect(color = "black", size = 1))
+
+
+levels.prop <- c("0–5","5–10","10–15", "15–20","20-25", "25+")
+
+dist.shp.mx$prop_class <- factor(cut(
+  dist.shp.mx$cmd_prop,
+  breaks = c(0, 5, 10, 15, 20, 25, Inf),
+  include.lowest = TRUE,
+  right = FALSE,
+  labels = levels.prop
+))
+
+# Proportion map
+p2 <- ggplot(dist.shp.mx) +
+  geom_sf(aes(fill = prop_class), color = "grey70", linewidth = 0.2) +
+  scale_fill_brewer(palette = "Reds", name = "Proportion (%)", drop = FALSE) +
+  geom_sf(data = prov.shp, fill = NA, color = "black", linewidth = 0.6) +
+  # annotation_scale(location = "bl", width_hint = 0.25) +
+  # annotation_north_arrow(location = "tr", which_north = "true", style = north_arrow_fancy_orienteering) +
+  theme_void()+
+  theme(plot.title = element_text(size = 9, hjust = 0.5),
+  panel.border = element_rect(color = "black", size = 1))
+
+  
+  
+  
+# Combine
+p1 <- p1 + labs(title = "A. Communicable disease mortality rate (per 100,000 population)")
+p2 <- p2 + labs(title = "B. Proportion of deaths due to CMD (% of total deaths)")
+cowplot::plot_grid(p1,  p2,  ncol=1)
+
+#p1 + p2 + plot_layout(nrow = 2)
+
+```
+
+Communicable disease mortality rates ranged from 49 to 336 deaths per 100,000 population across districts (@fig-map-rate). Manang had the highest rate (`r cmd_dt$cmd_rate[cmd_dt$dist ==37]` per 100,000 population), a value that should be interpreted cautiously because of its small exposure population. It was followed by Lalitpur (`r cmd_dt$cmd_rate[cmd_dt$dist ==30]`), Kaski (`r cmd_dt$cmd_rate[cmd_dt$dist ==40]`), and Kathmandu (`r cmd_dt$cmd_rate[cmd_dt$dist ==28]`), indicating concentration of high rates in several urban districts. The lowest rates were observed in Dadeldhura (`r cmd_dt$cmd_rate[cmd_dt$dist ==73]`), Khotang (`r cmd_dt$cmd_rate[cmd_dt$dist ==5]`), and Okhaldhunga (`r cmd_dt$cmd_rate[cmd_dt$dist ==4]`). The proportion of deaths attributable to communicable diseases ranged from 6% to 33%, with the highest shares in Manang (`r cmd_dt$cmd_prop[cmd_dt$dist ==37]`%), Lalitpur (`r cmd_dt$cmd_prop[cmd_dt$dist ==30]`%), Kathmandu (`r cmd_dt$cmd_prop[cmd_dt$dist ==28]`%), and Dolpa (`r cmd_dt$cmd_prop[cmd_dt$dist ==59]`%). Overall, district patterns showed both urban concentration and selected high-burden mountain districts.
+
+## Descriptive Characteristics of Study Population
+
+### Individual and Household Level Predictors
+
+```{r cat_var_table}
+#| label: tbl-des-cat
+#| tbl-cap: "Descriptive Summary of Individual- and Household-Level Characteristics of the Study Population"
+#| echo: false
+
+deathdt <- copy(dt)[,q05 := as.numeric(h15age)][, agegrp := fcase(
+    q05 <= 4,  "0-4",    q05 <= 14, "5-14",
+    q05 <= 24, "15-24",    q05 <= 34, "25-34",
+    q05 <= 44, "35-44",    q05 <= 54, "45-54",
+    q05 <= 64, "55-64", q05 <= 74, "65-74",
+    default    = "75+")
+  ][, water_cat := fcase( h06 %in% c("Tap/piped (within compound)", "Tap/piped (outside compound)", "Tube well/hand pump",
+                                       "Covered well/kuwa", "Jar/bottle"), "Safe",
+                          h06 %in% c("Uncovered well/kuwa", "Spout water", "Others", "River/stream"), "Unsafe",
+                          default = "Not Available source")
+               
+  ][, toilet_cat := fcase(h09 %in% c("Flush toilet connected to public sewerage",
+                                               "Flush toilet connected to septic tank",
+                                               "Ordinary toilet"), "Improved", 
+                          h09 %in% c("Public toilet", "No toilet"), "Unimproved", 
+                          default = "Not Available toilet")
+  
+  ][, fuel_cat := fcase(h07 %in% c("LPG", "Electricity", "Biogas"), "Clean",
+                        h07 %in% c("Wood/firewood", "Cow dung", "Kerosene", "Others"), "Polluting", 
+                        default = "Not available fuel")
+  ][, setnames(.SD, "h15sex", "sex")
+  ][, cause := if_else(h15caud == "Communicable disease", "cmd", "others")
+  ][, by = .(prov, dist, sex, dgub, agegrp, hh_edu, water_cat, toilet_cat, fuel_cat, cause),
+    .(deaths = sum(deaths))]
+
+cat_vars <- c("sex",  "agegrp", "dgub", "hh_edu", "water_cat", "toilet_cat")
+
+cat_final <- map_dfr(cat_vars, function(v) {
+
+  # denominator: exposure population from indidt
+  pop_tab <- indidt |>
+    group_by(.data[[v]]) |>
+    summarise(Population = sum(pop, na.rm = TRUE), .groups = "drop")
+
+  # CMD deaths per category
+  cmd_tab <- deathdt |>
+    filter(cause == "cmd") |>
+    group_by(.data[[v]]) |>
+    summarise(CMD_Deaths = sum(deaths, na.rm = TRUE), .groups = "drop")
+
+  # ALL deaths per category (CMD + others) — this is the share denominator
+  all_tab <- deathdt |>
+    group_by(.data[[v]]) |>
+    summarise(All_Deaths = sum(deaths, na.rm = TRUE), .groups = "drop")
+
+  pop_tab |>
+    full_join(cmd_tab, by = v) |>
+    full_join(all_tab, by = v) |>
+    mutate(
+      CMD_Deaths  = replace_na(CMD_Deaths, 0),
+      All_Deaths  = replace_na(All_Deaths, 0),
+      CMD_Rate    = CMD_Deaths / Population * 100000,
+      # CMD share = CMD deaths / all deaths in that category × 100
+      CMD_Percent = if_else(All_Deaths > 0,
+                            CMD_Deaths / All_Deaths * 100,
+                            NA_real_),
+      Variable    = v
+    ) |>
+    rename(Category = all_of(v))
+})
+
+cat_final <- cat_final |> filter(!is.na(CMD_Percent)) %>% 
+  mutate(
+    Category = factor(Category, levels = c(
+      "Female", "Male",
+      "0-4", "5-14", "15-24", "25-34", "35-44", "45-54", "55-64", "65-74", "75+",
+      #"Lowest", "Lower", "Middle", "Higher", "Highest",
+      "Rural", "Urban", "Peri-urban",
+      "No education", "Primary", "Lower secondary", "Secondary and above", "Not stated",
+      "Safe", "Unsafe",
+      "Improved", "Unimproved"))
+  ) |>
+  filter(!is.na(Category)) |>
+  arrange(Category) |>
+  mutate(
+    Population  = comma(round(Population)),
+    CMD_Deaths  = comma(round(CMD_Deaths)),
+    CMD_Rate    = round(CMD_Rate, 2),
+    CMD_Percent = round(CMD_Percent, 1)
+  ) |>
+  select(Category, Population, CMD_Deaths, CMD_Rate, CMD_Percent)
+
+
+cat_final_ft <- cat_final %>%
+  mutate(
+    Variable = c(
+      rep("Sex", 2),
+      rep("Age Group", 9),
+      #rep("Wealth Quintile", 5),
+      rep("Place of residence", 3),
+      rep("HH Education", 5),
+      rep("Drinking Water Source", 2),
+      rep("Toilet Facility", 2)
+    )
+  ) %>%
+  relocate(Variable)
+
+flextable(cat_final_ft) %>%
+  set_header_labels(
+    Variable    = "Variable",
+    Category    = "Category",
+    Population  = "Exposure population",
+    CMD_Deaths  = "CMD deaths",
+    CMD_Rate    = "CMD rate (per 100,000)",
+    CMD_Percent = "CMD share (%)"
+  ) %>%
+  merge_v(j = "Variable") %>%
+  valign(j = "Variable", valign = "top") %>%
+  theme_booktabs() %>%
+  autofit() %>%
+  align(j = c("Population", "CMD_Deaths", "CMD_Rate", "CMD_Percent"),
+        align = "right",
+        part = "all") %>%
+  fontsize(size = 9, part = "all") %>%
+  bold(part = "header") %>%
+  fix_border_issues()
+
+
+
+
+# helper to pull values cleanly
+cr  <- function(cat) round(cat_final$CMD_Rate[cat_final$Category == cat], 1)
+cp  <- function(cat) round(cat_final$CMD_Percent[cat_final$Category == cat], 1)
+cd  <- function(cat) cat_final$CMD_Deaths[cat_final$Category == cat]
+```
+
+Substantially higher CMD mortality was observed among males (`r cr("Male")` per 100,000 population) compared with females (`r cr("Female")` per 100,000 population). The proportion of deaths attributable to CMD was also higher in males (`r cp("Male")`%) than among females (`r cp("Female")`%), suggesting a consistent male disadvantage in both absolute burden and cause-specific mortality share.
+
+A pronounced age gradient in CMD mortality rate was observed. The rate increased steeply with advancing age, with individuals aged 75 years and above recording the highest rate of `r cr("75+")` per 100,000 population, followed by those aged 65–74 years (`r cr("65-74")` per 100,000). In contrast, the share of deaths attributed to CMD was highest in the 35–44 (`r cp("35-44")`%) and 45–54 (`r cp("45-54")`%) age groups, while the 75+ group, despite the highest mortality rate, showed a comparatively lower CMD share (`r cp("75+")`%), reflecting the competing burden of non-communicable and other causes in the oldest age group.
+
+CMD mortality also varied by place of residence. Urban strata had a higher crude CMD mortality rate (`r cr("Urban")` per 100,000 population) and CMD share (`r cp("Urban")`%) than rural (`r cr("Rural")` per 100,000; `r cp("Rural")`%) and peri-urban strata (`r cr("Peri-urban")` per 100,000; `r cp("Peri-urban")`%).
+
+For household education, the crude CMD mortality rate was highest among households with no education (`r cr("No education")` per 100,000 population) and lowest among households with lower-secondary education (`r cr("Lower secondary")` per 100,000). Households with secondary or higher education had a crude rate of `r cr("Secondary and above")` per 100,000, but accounted for most CMD deaths because they represented the largest share of the population.
+
+Crude CMD mortality rates were similar across water and sanitation categories. Safe-water strata had a rate of `r cr("Safe")` per 100,000 population, compared with `r cr("Unsafe")` per 100,000 among unsafe-water strata. Improved-sanitation strata had a rate of `r cr("Improved")` per 100,000, compared with `r cr("Unimproved")` per 100,000 among unimproved-sanitation strata. These crude comparisons differ from the adjusted model estimates below and should therefore be interpreted descriptively (@tbl-des-cat).
+
+### District-Level Community Predictors
+
+```{r cont_vars_table}
+#| label: tbl-des-cont
+#| tbl-cap: "Summary Statistics and Correlation with CMD Deaths for District-Level Predictors"
+#| echo: false
+#| warning: false
+#| message: false
+
+cmddt <- workdt |>  filter(cause == "cmd")
+cont_vars <- c("net-mig-rate", "pov", "urb_per", "density", "lt")
+
+cont_final <- lapply(cont_vars, function(v){
+
+  sm <- cmddt |>
+    summarise(
+      Mean = mean(.data[[v]], na.rm = TRUE),
+      SD   = sd(.data[[v]], na.rm = TRUE),
+      Min  = min(.data[[v]], na.rm = TRUE),
+      Max  = max(.data[[v]], na.rm = TRUE)
+    )
+
+  ct <- cor.test(cmddt[[v]], cmddt$deaths, use = "complete.obs", method = "pearson" )
+
+  sm |>
+    mutate(
+      Variable = v,
+      Correlation = round(unname(ct$estimate), 3),
+      P_value = round(ct$p.value, 4)
+    )
+
+}) |>
+  bind_rows() |> select(Variable, everything())
+
+var_labels <- c(
+  `net-mig-rate` = "Net migration rate",
+  pov = "Poverty (%)",
+  urb_per = "Urban population (%)",
+  density = "Population density",
+  lt = "Literacy (%)"
+  #elev = "Average elevation"
+  # mean_temp = "Mean temperature (°C)",
+  # total_precip = "Total precipitation (Annual)",
+  # pm25 = "PM2.5 concentration"
+)
+
+cont_final %>%
+  mutate(
+    Variable = var_labels[Variable],
+    across(c(Mean, SD, Min, Max), ~ round(.x, 2)),
+    Correlation = round(Correlation, 3),
+    P_value = ifelse(P_value < 0.001, "<0.001", sprintf("%.3f", P_value))
+  ) %>%
+  flextable() %>%
+  set_header_labels(
+    Variable    = "Variable",
+    Mean        = "Mean",
+    SD          = "SD",
+    Min         = "Min.",
+    Max         = "Max.",
+    Correlation = "r",
+    P_value     = "p-value"
+  ) %>%
+  theme_vanilla() %>%
+  autofit() %>%
+  align(
+    j = c("Mean", "SD", "Min", "Max", "Correlation", "P_value"),
+    align = "right",
+    part = "all"
+  ) %>%
+  bold(part = "header") %>%
+  fontsize(size = 9, part = "all")
+
+
+```
+
+@tbl-des-cont presents the summary statistics and bivariate correlations between district-level predictors and CMD deaths. On average, districts had a net migration of `r round(cont_final$Mean[cont_final$Variable=="net-mig-rate"],1)` per 1,000 native born population, a poverty level of `r round(cont_final$Mean[cont_final$Variable=="pov"],1)`%, and an urban population share of `r round(cont_final$Mean[cont_final$Variable=="urb_per"],0)`%.
+
+Population density showed the strongest bivariate correlation with CMD deaths (r = `r cont_final$Correlation[cont_final$Variable=="density"]`, p \< 0.001), followed by urban population share (r = `r cont_final$Correlation[cont_final$Variable=="urb_per"]`, p \< 0.001) and net migration rate (r = `r cont_final$Correlation[cont_final$Variable=="net-mig-rate"]`, p \< 0.001), all positively associated with CMD deaths and indicating higher raw burden in more densely populated, urbanized, and migration-intensive districts. Literacy showed a weak positive correlation (r = `r cont_final$Correlation[cont_final$Variable=="lt"]`, p \< 0.001), while poverty showed a weak negative correlation (r = `r cont_final$Correlation[cont_final$Variable=="pov"]`, p \< 0.001). Because these bivariate correlations are computed against raw stratum death counts rather than population-adjusted rates, they are strongly confounded by stratum population size and should be interpreted only as descriptive summaries of Table 3, not as evidence of association independent of exposure.
+
+The analytic dataset comprised `r scales::comma(length(unique(df$dcode)))` districts and `r nrow(df)` district-strata defined by cross-classification of district, sex, age group, place of residence, household education, water source, and toilet facility.
+
+Across strata, mean CMD deaths were `r round(mean(df$deaths[df$cause=="cmd"]),1)` (SD = `r round(sd(df$deaths[df$cause=="cmd"]),1)`; range = `r round(min(df$deaths[df$cause=="cmd"]),1)` – `r round(max(df$deaths[df$cause=="cmd"]),1)`), with a highly skewed distribution and many low-count strata.
+
+Multicollinearity diagnostics indicated no evidence of problematic collinearity, with all GVIF values below conventional thresholds across model covariates (**See Supplementary Materials for VIF values**).
+
+## Multilevel Variance Structure: Null Models and Intraclass Correlations
+
+```{r null_model}
+#| label: null-models
+#| include: false
+#| echo: false
+
+df<-df[, CMD := round(fifelse(cause == "cmd", deaths, 0))
+][hh_edu!= "Not stated"]
+# ][, wqnt := if_else(wqnt %in% c("Lowest", "Lower"), "Low",
+#                           if_else(wqnt %in% c("Higher", "Highest"), "High", "Middle"))]
+ 
+
+# 2-level null model (district)
+m0_2l <- glmmTMB(CMD ~ 1 + offset(log_pop) + (1 | district),
+                 data = df, family = nbinom2(link = "log"), REML = FALSE)
+
+# 3-level null model (province + district)
+m0_3l <- glmmTMB(CMD ~ 1 + offset(log_pop) + (1 | province/district),
+                 data = df, family = nbinom2(link = "log"), REML = FALSE)
+
+# ICC extraction
+vc           <- VarCorr(m0_3l)$cond
+var_province <- as.numeric(vc$province)
+var_district <- as.numeric(vc$`district:province`)
+
+var_residual <- (pi^2) / 3
+var_total    <- var_province + var_district + var_residual
+
+icc_province      <- var_province / var_total
+icc_district      <- var_district / var_total
+icc_same_district <- (var_province + var_district) / var_total
+```
+
+Negative binomial multilevel null models were first estimated to evaluate the extent of geographic clustering in communicable disease mortality and to determine the appropriate hierarchical structure for subsequent analyses. The two-level model demonstrated substantial between-district heterogeneity in mortality. The district-level intraclass correlation coefficient (ICC) was `r round(icc_district,3)`, indicating that `r round(icc_district*100,1)`% of the total variation in communicable disease mortality was attributable to differences between districts. To assess whether an additional level of geographic clustering existed, a three-level model with districts nested within provinces was subsequently fitted. The estimated province-level variance was essentially zero, whereas the district-level variance was `r round(var_district,4)`. The corresponding province-level ICC was negligible, indicating that little residual variation occurred between provinces after accounting for district-level clustering.
+
+Comparison of model fit statistics further supported the simpler hierarchical structure. The two-level and three-level models produced virtually identical log-likelihoods and very similar AIC values (AIC = `r round(AIC(m0_2l),2)` vs. `r round(AIC(m0_3l),2)`; @tbl-model-comparison), while the additional province-level random effect explained no meaningful variation. Therefore, all subsequent analyses were based on a two-level negative binomial model with district-level random intercepts.
+
+## Sequential Model Building and Goodness of Fit
+
+```{r main_models}
+#| label: sequential-models
+#| include: false
+#| echo: false
+
+# Individual
+m1 <- glmmTMB(
+  CMD ~ sex + agegrp + offset(log_pop) + (1 | district),
+  data = df, family = nbinom2(link = "log") )
+
+
+# Individual + HH
+m2 <- glmmTMB(
+  CMD ~ sex + agegrp + 
+    #wqnt + 
+    dgub + hh_edu + water_cat + toilet_cat + #fuel_cat +
+    offset(log_pop) + (1 | district), data = df,
+   family = nbinom2(link = "log"))
+
+# Individual + HH + District
+m3 <- glmmTMB(
+  CMD ~ sex + agegrp + 
+    #wqnt + 
+    dgub + hh_edu +  water_cat + toilet_cat + #fuel_cat +
+    nmr_std + pov_std + density_std+  lt_std + urb_per_std + #elev_std+
+    offset(log_pop) + (1 | district), data = df,
+   family = nbinom2(link = "log"))
+
+```
+
+```{r}
+#| label: tbl-model-comparison
+#| tbl-cap: "Model Comparison Metrics Across Sequential Models"
+#| echo: false
+#| warning: false
+
+get_sd <- function(model) {
+  vc <- VarCorr(model)$cond
+
+  # Each element of vc is a matrix; variance is the [1,1] element
+  prov <- tryCatch(sqrt(vc$province[1, 1]),             error = function(e) NA_real_)
+  dist <- tryCatch(sqrt(vc$`district:province`[1, 1]),
+                   error = function(e)
+                     tryCatch(sqrt(vc$district[1, 1]),  error = function(e) NA_real_))
+
+  c(Province_SD = prov, District_SD = dist)
+}
+
+models     <- list(m0_3l, m0_2l, m1, m2, m3)
+model_labs <- c("M0 (3-level)", "M0 (2-level)", "M1 (2-level)", "M2 (2-level)", "M3 (2-level)")
+
+sd_mat <- t(sapply(models, get_sd))
+
+
+# marginal and conditional rsquare
+get_r2 <- function(model) {
+  r2 <- performance::r2(model)
+
+  # if list (usual case)
+  if (is.list(r2)) {
+    return(c(
+      R2_marginal    = unname(r2$R2_marginal),
+      R2_conditional = unname(r2$R2_conditional)
+    ))
+  }
+
+  # if atomic vector (fallback case)
+  if (is.atomic(r2)) {
+    return(c(
+      R2_marginal    = unname(r2["R2_marginal"]),
+      R2_conditional = unname(r2["R2_conditional"])
+    ))
+  }
+
+  # safety fallback
+  c(R2_marginal = NA, R2_conditional = NA)
+}
+
+r2_mat <- t(sapply(models, get_r2))
+
+fit_table <- data.frame(
+  Model       = model_labs,
+  AIC         = round(sapply(models, AIC),                          1),
+  BIC         = round(sapply(models, BIC),                          1),
+  LogLik      = round(sapply(models, function(m) as.numeric(logLik(m))), 1),
+  df          = sapply(models, function(m) attr(logLik(m), "df")),
+  Province_SD = round(sd_mat[, "Province_SD"],                      5),
+  District_SD = round(sd_mat[, "District_SD"],                      3),
+   R2_marginal = round(r2_mat[, "R2_marginal"], 3),
+  R2_conditional = round(r2_mat[, "R2_conditional"], 3)
+) |>
+  mutate(dAIC = round(AIC - min(AIC), 2))
+
+
+fit_table |>
+  mutate(
+    Province_SD = as.numeric(Province_SD),
+    District_SD = as.numeric(District_SD),
+    R2_marginal = as.numeric(R2_marginal),
+    R2_conditional = as.numeric(R2_conditional)
+  ) |>
+  dplyr::select(
+    Model, AIC, BIC, LogLik, df,
+    Province_SD, District_SD,
+    R2_marginal, R2_conditional, dAIC
+  ) |>
+  flextable() |>
+  set_header_labels(
+    Model = "Model",
+    AIC = "AIC",
+    BIC = "BIC",
+    LogLik = "LogLik",
+    df = "df",
+    Province_SD = "Province SD",
+    District_SD = "District SD",
+    R2_marginal = "Marginal R²",
+    R2_conditional = "Conditional R²",
+    dAIC = "ΔAIC"
+  ) |>
+  colformat_num(
+    j = c("AIC", "BIC", "LogLik", "Province_SD",
+          "District_SD", "R2_marginal", "R2_conditional", "dAIC"),
+    digits = 3,
+    na_str = "-"
+  ) |>
+  theme_booktabs() |>
+  align(part = "all", align = "center") |>
+  align(j = 1, align = "left") |>
+  autofit()
+
+
+```
+
+Model fit statistics across the sequential specifications are presented in @tbl-model-comparison. The two-level null model (M0) served as the baseline. Incorporating individual-level covariates in M1 substantially improved model fit, as indicated by a lower AIC and higher log-likelihood compared with the null model. The addition of household-level covariates in M2 resulted in a marked further improvement. The final model (M3), which additionally included district-level covariates, provided the best overall fit, with the lowest AIC (`r fit_table$AIC[fit_table$Model == "M3 (2-level)"]`). However, the improvement over M2 was modest ($\Delta AIC$ = `r fit_table$dAIC[fit_table$Model == "M2 (2-level)"]`), suggesting that most explanatory gains had already been achieved after including household-level covariates. The district-level random-effect standard deviation further decreased to `r fit_table$District_SD[fit_table$Model == "M3 (2-level)"]`, although residual between-district heterogeneity remained.
+
+The marginal $R^2$ of the final model was `r fit_table$R2_marginal[fit_table$Model == "M3 (2-level)"]`, indicating that the fixed effects accounted for approximately `r round(as.numeric(fit_table$R2_marginal[fit_table$Model == "M3 (2-level)"]) *100, 2)`% of the model-explained variation in communicable disease mortality.
+
+The conditional $R^2$ was `r fit_table$R2_conditional[fit_table$Model == "M3 (2-level)"]`, showing that the combined contribution of fixed and random effects accounted for about `r round(as.numeric(fit_table$R2_conditional[fit_table$Model == "M3 (2-level)"]) *100, 2)`% of the model-explained variation. The relatively small difference between the marginal and conditional $R^2$ values suggests that most of the explained variation was attributable to the observed covariates, while a modest proportion remained associated with residual district-level heterogeneity captured by the random effects.
+
+## Fixed-Effect Estimates: Incidence Rate Ratios
+
+```{r irr_table}
+#| label: tbl-irr
+#| tbl-cap: "Fixed-Effect Estimates (Incidence Rate Ratios) from Sequential Multilevel Negative Binomial Models"
+#| echo: false
+#| warning: false
+
+
+get_irr <- function(term, model) {
+  tt <- tryCatch(
+    tidy(model, effects = "fixed", component = "cond",
+         conf.int = TRUE, exponentiate = TRUE),
+    error = function(e) NULL
+  )
+
+  if (is.null(tt)) return("—")
+
+  row <- tt[tt$term == term, ]
+  if (nrow(row) == 0) return("—")
+
+  stars <- case_when(
+    row$p.value < 0.001 ~ "***",
+    row$p.value < 0.01  ~ "**",
+    row$p.value < 0.05  ~ "*",
+    TRUE ~ ""
+  )
+
+  sprintf("%.2f (%.2f–%.2f)%s",
+          row$estimate, row$conf.low, row$conf.high, stars)
+}
+
+terms_individual <- c("sexFemale",
+                      "agegrp5-14","agegrp15-24","agegrp25-34",
+                      "agegrp35-44", "agegrp45-54", "agegrp55-64", "agegrp65-74", "agegrp75+")
+
+terms_household <- c("hh_eduPrimary", "hh_eduLower secondary", "hh_eduSecondary and above",
+                     "dgubUrban", "dgubPeri-urban",
+                    # "wqntLower","wqntMiddle","wqntHigher","wqntHighest",
+                    #"wqntMiddle", "wqntHigh",
+                                         
+                     "water_catUnsafe", "toilet_catUnimproved")
+
+terms_community <- c("nmr_std","pov_std", "density_std", "urb_per_std",  "lt_std")
+
+all_terms <- c(terms_individual, terms_household, terms_community)
+
+term_labels <- c(
+  "sexFemale" = "Sex: Female",
+
+  "agegrp5-14" = "Age: 5–14 years",
+  "agegrp15-24" = "Age: 15–24 years",
+  "agegrp25-34" = "Age: 25–34 years",
+  "agegrp35-44" = "Age: 35–44 years",
+  "agegrp45-54" = "Age: 45–54 years",
+  "agegrp55-64" = "Age: 55–64 years",
+  "agegrp65-74" = "Age: 65–74 years",
+  "agegrp75+" = "Age: 75+ years",
+
+  "hh_eduSecondary and above" = "HH Education: Secondary and above",
+  "hh_eduLower secondary" = "HH Education: Lower secondary",
+  "hh_eduPrimary" = "HH Education: Primary",
+  
+  "dgubUrban" = "Residence: Urban",
+  "dgubPeri-urban" = "Residence: Peri-urban",
+    
+  # "wqntLower" = "Wealth: Lower",
+  # "wqntMiddle" = "Wealth: Middle",
+  # "wqntHigher" = "Wealth: Higher",
+  # "wqntHighest" = "Wealth: Highest",
+
+  # "wqntMiddle" = "Wealth: Middle",
+  # "wqntHigh" = "Wealth: Higher",
+
+  "water_catUnsafe" = "Drinking water source: Unsafe",
+  "toilet_catUnimproved" = "Toilet facility: Unimproved",
+
+  "nmr_std" = "Net-migration rate (std)",
+  "urb_per_std" = "Urban population (std)",
+  "pov_std" = "Poverty index (std)",
+  "density_std" = "Population density (std)",
+  "lt_std" = "Literacy rate (std)"
+)
+
+all_terms <- all_terms[all_terms %in% names(term_labels)]
+
+pred_rows <- data.frame(
+  Level = c(rep("Individual", length(terms_individual)),
+            rep("Household", length(terms_household)),
+            rep("Community", length(terms_community))),
+
+  Predictor = unname(term_labels[all_terms]),
+
+  M1 = sapply(all_terms, get_irr, model = m1),
+  M2 = sapply(all_terms, get_irr, model = m2),
+  M3 = sapply(all_terms, get_irr, model = m3),
+
+  stringsAsFactors = FALSE
+)
+
+# ordering
+pred_rows$Level <- factor(pred_rows$Level, levels = c("Individual", "Household", "Community"))
+pred_rows <- pred_rows |> arrange(Level)
+
+make_grouped <- function(df) {
+
+  split_df <- split(df, df$Level)
+
+  out <- do.call(rbind, lapply(names(split_df), function(g) {
+
+    grp <- split_df[[g]]
+
+    header <- grp[1, ]
+    header[,] <- ""
+    header$Predictor <- g
+
+    rbind(header, grp)
+  }))
+
+  out
+}
+
+pred_rows2 <- make_grouped(pred_rows)
+
+
+flextable(pred_rows2) |>
+
+  set_header_labels(
+    Predictor = "Predictor",
+    M1 = "Model-1 IRR (95% CI)",
+    M2 = "Model-2 IRR (95% CI)",
+    M3 = "Model-3 IRR (95% CI)",
+    Level = ""
+  ) |> delete_columns("Level") %>% 
+  align(part = "all", align = "center") |>
+  align(j = 1, align = "left") |>
+  autofit() |>
+  theme_booktabs() |>
+
+  bold(i = ~ Predictor %in% c("Individual", "Household", "Community"),
+       bold = TRUE, part = "body") |> 
+  add_footer_lines(values =  "* p-value < 0.05; ** p-value < 0.01; *** p-value < 0.001")
+
+
+
+get_irr_clean <- function(model, term) {
+  tt <- tryCatch( 
+    tidy(
+      model, 
+      effects = "fixed", 
+      component = "cond", 
+      conf.int = TRUE, 
+      exponentiate = TRUE),
+    
+    error = function(e) NULL
+  )
+  if (is.null(tt)) return("—")
+  row <- tt[tt$term == term, ]
+  if (nrow(row) == 0) return("—")
+  
+  sprintf("%.2f [95%% C.I. : %.2f – %.2f]", row$estimate, row$conf.low, row$conf.high)
+}
+
+tidy_irr <-  data.table(
+  Predictor = unname(term_labels[all_terms]),
+  res = sapply(all_terms, get_irr_clean, model = m3))
+
+tidy_irr2 <-  data.table(
+  Predictor = unname(term_labels[all_terms]),
+  res = sapply(all_terms, get_irr_clean, model = m2))
+
+tidy_irr1 <-  data.table(
+  Predictor = unname(term_labels[all_terms]),
+  res = sapply(all_terms, get_irr_clean, model = m1))
+
+```
+
+@tbl-irr presents the adjusted incidence rate ratios (IRRs) from the sequential multilevel negative binomial regression models examining factors associated with communicable disease mortality. Model 1 included individual-level covariates, Model 2 additionally adjusted for household-level characteristics, and Model 3 further incorporated district-level contextual variables.
+
+In Model 1, communicable disease mortality varied significantly by age and sex. Females had a lower mortality rate than males *(IRR = `r tidy_irr1$res[tidy_irr1$Predictor == "Sex: Female"]`)*, and this association persisted in the fully adjusted model *(IRR = `r tidy_irr$res[tidy_irr$Predictor == "Sex: Female"]`)*. A clear age gradient was observed, with mortality increasing substantially among older age groups. In the fully adjusted model, individuals aged 65–74 years and ≥75 years had approximately three-fold *(IRR = `r tidy_irr[Predictor == "Age: 65–74 years", res]`)* and nearly six-fold *(IRR = `r tidy_irr[Predictor == "Age: 75+ years", res]`)* higher mortality rates, respectively, compared with children aged 0–4 years.
+
+Adjustment for household-level characteristics in Model 2 substantially improved model fit and explained much of the association observed in Model 1. Higher household educational attainment was consistently associated with lower communicable disease mortality. Compared with households with no formal education, households with secondary or higher education had an 89% lower mortality rate *(IRR = `r tidy_irr$res[tidy_irr$Predictor == "HH Education: Secondary and above"]`)*. Urban residence was associated with higher mortality than rural residence *(IRR = `r tidy_irr$res[tidy_irr$Predictor == "Residence: Urban"]`)*, whereas peri-urban residence showed a lower, borderline association *(IRR = `r tidy_irr$res[tidy_irr$Predictor == "Residence: Peri-urban"]`)*.
+
+Households using unsafe drinking water and unimproved sanitation facilities experienced substantially higher mortality rates after adjustment for individual, household, and district-level covariates. The fully adjusted IRR was `r tidy_irr$res[tidy_irr$Predictor == "Drinking water source: Unsafe"]` for unsafe water and `r tidy_irr$res[tidy_irr$Predictor == "Toilet facility: Unimproved"]` for unimproved sanitation.
+
+The inclusion of district-level contextual variables in Model 3 produced only modest changes in the estimated associations for individual- and household-level factors, indicating that these associations were robust after accounting for district-level characteristics. Among the contextual variables, district literacy rate was positively associated with communicable disease mortality *(IRR = `r tidy_irr$res[tidy_irr$Predictor == "Literacy rate (std)"]`)*. Net migration rate, district-level poverty, urban population proportion, and population density were not significantly associated with CMD mortality after adjustment.
+
+```{r forest_fig}
+#| label: fig-forest
+#| fig-cap: "Forest plot of IRR (Two-level negative binomial model; count component)."
+#| fig-width: 7.5
+#| fig-height: 6
+#| echo: false
+#| warning: false
+
+conflicts_prefer(dplyr::recode)
+
+irr_df <- tidy(m3, effects = "fixed", component = "cond",
+               conf.int = TRUE, exponentiate = TRUE) |>
+  filter(term != "(Intercept)") |>
+  mutate(p.value = round(p.value,3)) %>% 
+  mutate(
+    Level = case_when(
+      term %in% c("sexFemale", grep("agegrp", term, value = TRUE)) ~ "Individual",
+      term %in% c("dgubUrban", "dgubPeri-urban",
+                  "hh_eduPrimary","hh_eduLower secondary", "hh_eduSecondary and above",
+                  "water_catUnsafe", "toilet_catUnimproved") ~ "Household",
+      term %in% c("nmr_std", "urb_per_std", "pov_std", "density_std", "lt_std") ~ "Community",
+      TRUE ~ "Other"),
+
+    Label = case_when(
+      term == "sexFemale" ~ "Sex: Female",
+
+      term == "agegrp5-14" ~ "Age: 5–14 years",
+      term == "agegrp15-24" ~ "Age: 15–24 years",
+      term == "agegrp25-34" ~ "Age: 25–34 years",
+      term == "agegrp35-44" ~ "Age: 35–44 years",
+      term == "agegrp45-54" ~ "Age: 45–54 years",
+      term == "agegrp55-64" ~ "Age: 55–64 years",
+      term == "agegrp65-74" ~ "Age: 65–74 years",
+      term == "agegrp75+" ~ "Age: 75+ years",
+
+      term == "dgubUrban" ~ "Residence: Urban",
+      term == "dgubPeri-urban" ~ "Residence: Peri-urban",
+      
+      term == "hh_eduPrimary" ~ "HH Education: Primary",
+      term == "hh_eduSecondary and above" ~ "HH Education: Secondary and above",
+      term == "hh_eduLower secondary" ~ "HH Education: Lower secondary",
+      
+      term == "water_catUnsafe" ~ "Drinking water source: Unsafe",
+      term == "toilet_catUnimproved" ~ "Toilet facility: Unimproved",
+
+      term == "nmr_std" ~ "Net-migration rate (std)",
+      term == "urb_per_std" ~ "Urban population (std)",
+      term == "pov_std" ~ "Poverty rate (std)",
+      term == "density_std" ~ "Population density (std)",
+      term == "lt_std" ~ "Literacy rate (std)",
+
+      TRUE ~ term ),
+
+    sig = case_when(
+      p.value < 0.01  ~ "p < 0.01",
+      p.value < 0.05  ~ "p < 0.05",
+      TRUE ~ "p ≥ 0.05") ) |>
+
+  mutate(
+    Level = factor(Level, levels = c("Individual", "Household", "Community")),
+    Label = fct_relevel(Label,
+      "Sex: Female",
+      "Age: 5–14 years",
+      "Age: 15–24 years",
+      "Age: 25–34 years",
+      "Age: 35–44 years",
+      "Age: 45–54 years",
+      "Age: 55–64 years",
+      "Age: 65–74 years",
+      "Age: 75+ years",
+
+      "Residence: Urban",
+      "Residence: Peri-urban",
+      
+      "HH Education: Primary",
+      "HH Education: Lower secondary",
+      "HH Education: Secondary and above",
+      
+      "Drinking water source: Unsafe",
+      "Toilet facility: Unimproved",
+      
+      "Net-migration rate (std)",
+      "Urban population (std)",
+      "Poverty rate (std)",
+      "Population density (std)",
+      "Literacy rate (std)"
+    )
+  )
+
+
+ggplot(irr_df, aes(x = estimate, y = Label, colour = Level, shape = sig)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey40", linewidth = 0.6) +
+  geom_errorbar(aes(xmin = conf.low, xmax = conf.high),
+                width = 0.25, linewidth = 0.6) +
+  geom_point(size = 3) +
+  
+  scale_x_log10(
+    breaks = c(0.25, 0.5, 1, 2, 4, 8, 16),
+    labels = c("0.25", "0.5", "1", "2", "4", "8", "16")) +
+  
+  scale_colour_manual(values = c("Individual" = "#1F78B4", "Household"  = "#E87722", "Community"  = "#0f6808"),guide = "none", name = NULL) +
+  scale_shape_manual(values = c("p < 0.001" = 17, "p < 0.01"  = 19, "p < 0.05"  = 15, "p ≥ 0.05"  = 1), name = NULL) +
+  facet_grid(Level ~ ., scales = "free_y", space = "free_y") +
+  
+  theme_bw(base_size = 10) +
+  theme(
+    strip.background = element_rect(fill = "grey92", colour = "grey70"),
+    strip.text = element_text(face = "bold", size = 9),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom") +
+  
+  labs(x = "Incidence Rate Ratio (log scale)", y = NULL,
+    caption = paste(
+      "Reference categories:",
+      "Sex = Male;", "Age = 0-4 years;",
+      "Residence = Rural; \n",
+      "Highest household-level education = No education;",
+      "Drinking water source = Safe;", "Toilet facility = Improved") )
+
+```
+
+@fig-forest shows the plot of incidence rate ratios from the final model.
+
+Overall, the findings showed that household socioeconomic and environmental characteristics were more strongly associated with communicable disease mortality than the district-level contextual variables considered in this study, while substantial age-related differences in mortality persisted after adjustment for all covariates.
+
+## Predicted Communicable Disease Rates: Age-Sex and Education Gradients
+
+```{r prediction}
+#| label: fig-pred-agesex
+#| fig-cap:  "Model-based predicted communicable disease mortality rates per 100,000 enumerated population from the final model. Predictions fix the offset at a reference population of 100,000 with all covariates held at reference values (community covariates at their sample means). Panel A: age–sex gradient. Panel B: household-level education gradient. Shaded areas represent 95% confidence intervals."
+#| fig-width: 8
+#| fig-height: 5
+#| echo: false
+#| warning: false
+
+# PANEL A: AGE–SEX PATTERN
+# fix offset at log(100000) so predicted values are directly per 100,000
+pred10 <- ggpredict(
+  m3,
+  terms = c("agegrp", "sex"),
+  condition = c(
+    #wqnt        = levels(df$wqnt)[1],
+    water_cat   = levels(df$water_cat)[1],
+    toilet_cat  = levels(df$toilet_cat)[1],
+    hh_edu      = levels(df$hh_edu)[1],
+    dgub        = levels(df$dgub)[1],
+    nmr_std     = 0,
+    pov_std     = 0,
+    #urb_per_std = 0,
+    density_std = 0,
+    lt_std = 0,
+    log_pop     = log(100000)),
+  type = "fixed") |>
+  as.data.frame() |>  rename(agegrp = x, sex = group) |> 
+  mutate(val = sprintf("%.2f (%.2f–%.2f)", predicted, conf.low, conf.high))
+
+p1 <- ggplot(pred10, aes(x = agegrp, y = predicted,
+                 colour = sex, group = sex, fill = sex)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high),
+              alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.5) +
+  scale_colour_manual(
+    values = c("Male" = "#185FA5", "Female" = "#D4537E"),
+    name   = "Sex" ) +
+  scale_fill_manual(
+    values = c("Male" = "#185FA5", "Female" = "#D4537E"),
+    name   = "Sex"
+  ) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "(A) Age\u2013sex specific predicted mortality rates",
+    x     = "Age group",
+    y     = "Predicted CMD deaths per 100,000 population"
+  ) +
+  theme_manuscript
+
+# PANEL B: education gradient
+pred11 <- ggpredict(
+  m3,
+  terms = "hh_edu",
+  condition = c(
+    sex         = levels(df$sex)[1],
+    agegrp      = levels(df$agegrp)[1],
+    water_cat   = levels(df$water_cat)[1],
+    toilet_cat  = levels(df$toilet_cat)[1],
+    #wqnt        = levels(df$wqnt)[1],
+    dgub        = levels(df$dgub)[1],
+    nmr_std     = 0,
+    pov_std     = 0,
+    #density_std = 0,
+    urb_per_std = 0,
+    lt_std = 0,
+    log_pop     = log(100000)), type = "fixed") |>
+  as.data.frame() |>
+  rename(hh_edu = x) |>
+  mutate(hh_edu = factor(hh_edu,
+           levels = c("No education", "Primary", "Lower secondary", "Secondary and above"))) |> 
+  mutate(val = sprintf("%.2f (%.2f–%.2f)", predicted, conf.low, conf.high))
+
+p2 <- ggplot(pred11, aes(x = hh_edu, y = predicted, group = 1)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high),
+              fill = "#E87722", alpha = 0.20) +
+  geom_line(colour = "#E87722", linewidth = 1) +
+  geom_point(colour = "#E87722", size = 2.5) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "(B) Household education gradient in predicted mortality",
+    x     = "Household highest education",
+    y     = "Predicted CMD deaths per 100,000 population"
+  ) +
+  theme_manuscript
+
+
+
+p1 + p2 + plot_layout(ncol = 2)
+```
+
+@fig-pred-agesex presents model-based predicted CMD mortality rates per 100,000 population from the final model, with all covariates held at reference levels.
+
+Panel A reveals clear age and sex differentials in predicted mortality. Rates were consistently higher among males than females across all age groups, with the absolute sex differential widening markedly at older ages. Mortality was elevated in early childhood (0–4 years), declined through adolescence and young adulthood to a trough in the 15–34 year age group, and then rose steeply from age 55 onwards. This U-shaped pattern is consistent with the greater biological vulnerability of young children and older adults to communicable diseases.
+
+Panel B illustrates a non-linear education gradient in predicted mortality. Rates were lowest among households with secondary or higher education (approximately `r round(pred11$predicted[pred11$hh_edu == "Secondary and above"], 0)` per 100,000) and highest among households with no education (`r round(pred11$predicted[pred11$hh_edu == "No education"], 0)` per 100,000).
+
+## Model Diagnostics
+
+```{r model diagnostic}
+#| echo: false
+#| warning: false
+
+set.seed(42)
+sim_res <- simulateResiduals(fittedModel = m3, n = 1000, plot = F)
+
+res_vals    <- sim_res$scaledResiduals
+fitted_vals <- sim_res$fittedPredictedResponse
+
+ks_res   <- ks.test(res_vals, "punif")
+ks_p     <- ks_res$p.value
+ks_label <- ifelse(ks_p < 0.001, "KS test: p < 0.001", paste0("KS test: p = ", round(ks_p, 3)))
+
+```
+
+Model adequacy was assessed using DHARMa simulation-based residual diagnostics (1,000 simulations). Although the Kolmogorov–Smirnov test detected a statistically significant deviation from the expected uniform distribution (D = `r round(ks_res$statistic, 3)`, p \< 0.001), the magnitude of the deviation was small, and residual plots showed no discernible patterns against fitted values. Overall, the diagnostics did not indicate substantial model misspecification, supporting the adequacy of the final two-level model.
+
+# Discussion
+
+## Principal findings
+
+This study provides a comprehensive multilevel assessment of socioeconomic and demographic factors associated with communicable disease (CMD) mortality in Nepal. Three key findings were concluded from the study. First, CMD mortality showed meaningful geographic clustering at the district level, whereas province-level clustering was negligible. Second, individual- and household-level covariates, particularly age, sex, household education, residence, drinking water source, and sanitation, were strongly associated with CMD mortality. Third, district-level variables contributed comparatively little after household-level factors were included, with literacy rate the only contextual indicator that remained statistically associated with CMD mortality. Collectively, these findings reinforce multilevel frameworks of health inequality by showing that CMD mortality is shaped most strongly by demographic vulnerability and proximate household conditions rather than by aggregated contextual deprivation alone.
+
+## Geographic clustering and the primacy of district-level heterogeneity
+
+The observed ICC (`r round(icc_district*100,1)`%) confirms meaningful spatial structuring of CMD mortality at the district level, while the absence of meaningful province-level variance indicates that administrative aggregation at higher spatial scales obscures locally important epidemiological heterogeneity. This finding is consistent with accumulating evidence from multilevel spatial epidemiology showing that health outcomes are more strongly patterned at intermediate administrative units where sanitation infrastructure, health service accessibility, and environmental exposures vary most sharply [@diezrouxGlossaryMultilevelAnalysis2002; @diezrouxInvestigatingNeighborhoodArea2001].
+
+Districts in Nepal represent precisely such units: they are the primary loci of variation in WASH coverage, public health implementation, and healthcare facility distribution, which likely explains their greater explanatory power compared with provinces. Spatial analyses of infectious disease in Nepal further corroborate this district-level structuring. Studies of tuberculosis and dengue in Nepal have consistently identified district-level hotspots and spatial clusters that do not align neatly with provincial administrative boundaries, underscoring the irreducibility of district heterogeneity in Nepal's disease landscape [@bhandariDengue2025].
+
+## Age–sex patterning and epidemiological transition dynamics
+
+The strong age gradient in CMD mortality was identified. Mortality risks was lower among younger individuals but increased substantially from age 45 years onwards. This pattern reflects the increasing susceptibility to infectious diseases with advancing age due to immunosenescence, accumulated comorbodities, and declining physiological reserve. The sex differential, with females having lower CMD mortality than males, is consistent with global evidence documenting higher infectious-disease severity and mortality among males [@GBDLRI2022].
+
+The observed age pattern also reflects Nepal's ongoing epidemiological transition. Between 1990 and 2021, Nepal witnessed a substantial shift in the disease burden from communicable, maternal, neonatal, and nutritional causes toward non-communicable diseases [@NGBD2021; @GBD2021Causes]. The relatively lower CMD share among the oldest age group, despite their highest absolute CMD mortality rate, is consistent with this transition dynamic: in the oldest cohorts, non-communicable and degenerative causes increasingly dominate the cause-of-death distribution, compressing the proportional contribution of communicable diseases even as absolute rates remain elevated. Nepal's double burden of disease—where elevated infectious disease mortality co-exists alongside rising NCD burden has been documented at the national and subnational levels [@NGBD2021; @Gardner2022]. The present study's findings from census microdata reinforce this characterisation: communicable diseases remain a significant but residual cause of death, concentrated in socially and biologically vulnerable subgroups.
+
+## Household environment as the dominant axis of inequality
+
+The strongest and most consistent risk amplifiers in this analysis arise from household-level environmental conditions, particularly drinking water source and sanitation facility type. The effect sizes associated with unsafe water and unimproved sanitation were substantially larger than those for most individual or district-level covariates, underscoring the primacy of proximate environmental determinants in Nepal's CMD mortality landscape.
+
+This finding aligns closely with the proximate–distal causal framework of infectious disease mortality, which posits that environmental pathways—particularly water, sanitation, and hygiene operate as immediate mechanisms linking upstream structural inequality to downstream disease outcomes. Global burden of disease analyses confirm that unsafe water and poor sanitation remain among the most consequential preventable determinants of infectious disease mortality across low- and middle-income settings [@GBD2021RiskFactors]. The WASH-associated effect sizes observed in the present study are therefore biologically plausible and consistent with global evidence, although the magnitude may partly reflect clustering of multiple unmeasured risks among households with unsafe water and unimproved sanitation. A 2022 Lancet systematic review of WASH interventions in low- and middle-income countries demonstrated significant reductions in diarrhoeal disease risk attributable to improved water, sanitation, and hygiene access [@wolfEffectivenessInterventionsImprove2022].
+
+Nepal's geographical heterogeneity in WASH access is well-documented, with substantial inequality in improved sanitation and water coverage across districts, particularly between Madhesh Province (plains) and hill/mountain regions. The present finding that household-level WASH conditions dominate CMD risk in the fully adjusted model implies that district-level poverty rates and urbanisation are insufficient as policy proxies: the critical intervention targets are household-level infrastructure endowments, not aggregate administrative unit characteristics.
+
+## Education
+
+The highest education level among household members showed a strong protective association with CMD mortality. Compared with households with no education, mortality was lower among households with primary, lower-secondary, and secondary or higher education. This pattern suggests that household educational resources may influence CMD mortality through health literacy, care-seeking behaviour, sanitation practices, and capacity to navigate health services [@naidoo2024].
+
+## Place of residence
+
+Compared with rural areas, urban residence was associated with substantially higher adjusted CMD mortality. Peri-urban residence showed a lower borderline association. The elevated urban association may reflect concentrated population density, migration, health-care-seeking and reporting differences, or residual compositional factors not fully captured by the available district-level indicators [@NPHC2021NationalReport; @WHOCCSNepal2023].
+
+## Limited role of district-level socioeconomic indicators
+
+The weak and largely non-significant associations of district-level poverty, net migration rate, urbanisation, and population density in the study suggest that macro-level contextual indicators contribute comparatively little to CMD mortality variation once household-level conditions are explicitly modelled. District literacy rate remained positively associated with CMD mortality, which may reflect the concentration of older populations, better cause-of-death reporting, or other compositional features in more literate districts rather than a direct harmful effect of literacy itself. The overall attenuated role of district-level covariates aligns with critiques in multilevel epidemiology arguing that aggregate socioeconomic variables often lose explanatory power when proximate determinants are included [@diezrouxInvestigatingNeighborhoodArea2001]. In this context, district-level poverty and urbanisation may operate primarily indirectly through the distribution of household-level WASH infrastructure and demographic composition rather than exerting strong independent contextual effects on CMD mortality. This finding has practical implications for policy design. It implies that district-level socioeconomic targeting—while necessary for equity-oriented resource allocation—is insufficient as a proxy for identifying households at highest CMD mortality risk. Direct household-level screening for unimproved WASH conditions, particularly in districts with high CMD burden, would more precisely target vulnerable populations.
+
+## Strengths and Limitations
+
+Several limitations should be acknowledged in interpreting these findings. First, the study design is cross-sectional, precluding causal inference; the observed associations cannot establish temporal precedence or rule out confounding by unmeasured time-varying factors. Second, cause-of-death ascertainment relies on household-reported information from the census questionnaire. Household reporting is susceptible to misclassification, particularly between communicable and non-communicable causes, and may differentially bias estimates across educational, geographic, and urban-rural strata. Third, although the multilevel negative binomial model accounts for overdispersion and district clustering, residual heterogeneity may remain because several potentially important confounders are unavailable in the census, including HIV status, nutritional status, vaccination coverage, and health facility utilisation at the stratum level. Fourth, the district-level small-area poverty estimates used in this study are derived from a 2023 auxiliary model rather than directly from the census, introducing measurement uncertainty at the district level [@sae_report]. Fifth, the analysis does not separately examine specific communicable disease sub-categories, such as respiratory infections, diarrhoeal diseases, tuberculosis, and vector-borne diseases, which have distinct epidemiology and risk factors. Future work should disaggregate CMD into cause-specific categories to provide more targeted evidence for disease-specific interventions.
+
+# Conclusions
+
+This study provides robust multilevel evidence on the socioeconomic and demographic determinants of communicable disease mortality in Nepal using the 2021 National Population and Housing Census. District-level geographic clustering accounts for approximately one-fifth of total CMD mortality variation, while province-level heterogeneity is negligible, indicating that the district is the appropriate unit of analysis and intervention for infectious disease surveillance and control in Nepal. Household environmental conditions, particularly safe drinking water and improved sanitation, emerge as dominant modifiable determinants of CMD mortality, with effect sizes substantially exceeding those of aggregate socioeconomic indicators. These findings provide strong evidence for prioritising household-level WASH interventions as a primary strategy for reducing communicable disease mortality in Nepal, with district-level targeting insufficient as a proxy for identifying the most vulnerable households. Strong age and sex gradients confirm that older adults and males bear disproportionate communicable disease mortality risk, while elevated predicted mortality among children under five indicates continuing vulnerability early in life. The strong protective association of household education further highlights the importance of household resources, health literacy, and care-seeking capacity in shaping CMD mortality. As Nepal continues its epidemiological transition, communicable disease mortality will increasingly be concentrated among specific high-risk subgroups rather than distributed broadly across the population. Evidence-based policy responses should prioritise universal WASH infrastructure coverage at the household level, with targeted outreach to the most vulnerable demographic groups, alongside sustained infectious disease surveillance and cause-of-death recording capacity to support future population health monitoring.
+
+# Declarations
+
+## Ethics Approval and Consent to Participate
+
+This study used publicly available, anonymised census data. No individual-level identifiers were retained in the analytical dataset. Formal ethical review was not required under applicable national guidelines for secondary analysis of anonymised population data.
+
+## Consent for Publication
+
+Not applicable.
+
+## Availability of Data and Materials
+
+The study used secondary census microdata and publicly available district-level indicators. Access to the census microdata is governed by the National Statistics Office of Nepal. Derived analytic code and district-level inputs are available from the corresponding author on reasonable request, subject to data-use permissions.
+
+## Competing Interests
+
+The authors declare that they have no competing interests.
+
+## Funding
+
+No specific funding was reported for this study.
+
+## Authors' Contributions
+
+
+## Acknowledgements
+
+The authors acknowledge the National Statistics Office of Nepal for conducting the National Population and Housing Census 2021 and making census resources available for research use.
+
+# References
+
+::: {#refs}
+:::
+
+# Supplementary Material {.appendix}
+
+## Multicollinearity Among Predictors
+
+**Table S1.** Generalized variance inflation factors (GVIFs) for predictors considered in the count regression models.
+
+```{r vif}
+#| label: supp-vif
+#| warning: false
+#| message: false
+#| echo: false
+
+library(car)
+library(dplyr)
+library(tibble)
+library(knitr)
+
+cmd_df <- df |> filter(cause == "cmd")
+
+vif_model <- lm(
+  CMD ~
+    #wqnt +
+    agegrp +
+    sex +
+    hh_edu +
+    dgub+
+    water_cat +
+    toilet_cat +
+  
+    nmr_std +
+    pov_std +
+    urb_per_std + 
+    density_std + 
+    lt_std,
+  data = df
+)
+
+vif_tbl <- car::vif(vif_model)
+
+vif_tbl <- as.data.frame(vif_tbl) |>
+  rownames_to_column("Predictor") |>
+  rename("Adjusted_GVIF" = "GVIF^(1/(2*Df))")
+
+ft_vif <- vif_tbl |>
+  flextable() |>
+
+  # ---------------------------
+  # headers
+  # ---------------------------
+  set_header_labels(
+    Predictor     = "Predictor",
+    GVIF          = "GVIF",
+    Df            = "Df",
+    Adjusted_GVIF = "Adjusted GVIF"
+  ) |>
+
+  # ---------------------------
+  # formatting
+  # ---------------------------
+  align(part = "all", align = "center") |>
+  align(j = "Predictor", align = "left") |>
+  colformat_num(j = c("GVIF", "Adjusted_GVIF"),
+                 digits = 2) |>
+  autofit() |>
+  theme_booktabs()
+
+ft_vif
+
+
+
+```
+
+## Sensitivity Analysis: Two-Level versus Three-Level Model
+
+```{r sensitivity_setup}
+#| label: sensitivity-setup
+#| include: false
+#| echo: false
+#| warning: false
+
+# Fit three-level NB model (province/district random intercepts)
+# Individual + HH + District
+m_3l <- glmmTMB(
+  CMD ~ sex + agegrp + 
+    dgub + hh_edu +  water_cat + toilet_cat + 
+    nmr_std + pov_std + urb_per_std + density_std+ lt_std+
+    offset(log_pop) + (1 | province/district), data = df,
+   family = nbinom2(link = "log"))
+
+delta_aic <- round(AIC(m_3l) - AIC(m3), 1)
+delta_bic <- round(BIC(m_3l) - BIC(m3), 1)
+delta_ll  <- round(as.numeric(logLik(m_3l)) - as.numeric(logLik(m3)), 1)
+
+aic_preferred <- ifelse(AIC(m_3l) < AIC(m3), "3-level", "2-level")
+bic_preferred <- ifelse(BIC(m_3l) < BIC(m3), "3-level", "2-level")
+
+```
+
+**Table S2.** Sensitivity analysis: multilevel structure (two-level vs. three-level negative binomial model).
+
+```{r sensitivity_table}
+#| label: supp-sensitivity
+#| echo: false
+#| warning: false
+
+get_irr_row <- function(model, term) {
+  tt <- tryCatch(
+    tidy(model, effects = "fixed", component = "cond",
+         conf.int = TRUE, exponentiate = TRUE),
+    error = function(e) NULL
+  )
+  empty <- list(est = NA_real_, lo = NA_real_, hi = NA_real_, cell = "\u2014")
+  if (is.null(tt)) return(empty)
+  row <- tt[tt$term == term, ]
+  if (nrow(row) == 0) return(empty)
+  stars <- dplyr::case_when(
+    row$p.value < 0.001 ~ "***",
+    row$p.value < 0.01  ~ "**",
+    row$p.value < 0.05  ~ "*",
+    TRUE                ~ ""
+  )
+  list(
+    est  = row$estimate,
+    lo   = row$conf.low,
+    hi   = row$conf.high,
+    cell = sprintf("%.2f (%.2f\u2013%.2f)%s",
+                   row$estimate, row$conf.low, row$conf.high, stars)
+  )
+}
+
+t5_rows <- lapply(all_terms, function(trm) {
+
+  r2l <- get_irr_row(m3, trm)
+  r3l <- get_irr_row(m_3l, trm)
+
+  consistent <- dplyr::case_when(
+    is.na(r2l$est) | is.na(r3l$est) ~ "—",
+    (r2l$est > 1 & r3l$est > 1) |
+      (r2l$est < 1 & r3l$est < 1) ~ "Yes",
+    TRUE ~ "No"
+  )
+
+  note <- dplyr::case_when(
+    is.na(r2l$lo) | is.na(r3l$lo) ~ "",
+    !(r2l$lo < r3l$hi & r3l$lo < r2l$hi) ~ "CI overlap limited",
+    TRUE ~ ""
+  )
+
+  data.frame(
+    Predictor  = term_labels[trm],
+    TwoLevel   = r2l$cell,
+    ThreeLevel = r3l$cell,
+    Consistent = consistent,
+    Notes      = note
+  )
+})
+
+fit_rows_t5 <- bind_rows(
+  data.frame(
+    Predictor  = "AIC",
+    TwoLevel   = round(AIC(m3), 1),
+    ThreeLevel = round(AIC(m_3l), 1),
+    Consistent = "—",
+    Notes      = ifelse(AIC(m_3l) < AIC(m3),
+                         "3-level preferred", "2-level preferred")
+  ),
+  data.frame(
+    Predictor  = "BIC",
+    TwoLevel   = round(BIC(m3), 1),
+    ThreeLevel = round(BIC(m_3l), 1),
+    Consistent = "—",
+    Notes      = ifelse(BIC(m_3l) < BIC(m3),
+                         "3-level preferred", "2-level preferred")
+  ),
+  data.frame(
+    Predictor  = "Log-Likelihood",
+    TwoLevel   = round(as.numeric(logLik(m3)), 1),
+    ThreeLevel = round(as.numeric(logLik(m_3l)), 1),
+    Consistent = "—",
+    Notes      = ""
+  )
+)
+
+t5_full <- rbind(rbindlist(t5_rows), fit_rows_t5)
+
+
+t5_full |>
+  dplyr::select(Predictor, TwoLevel, ThreeLevel) |>
+  flextable() |>
+  set_header_labels(
+    Predictor  = "Predictor",
+    TwoLevel   = "Two-Level",
+    ThreeLevel = "Three-Level"
+  ) |>
+  align(part = "all", align = "center") |>
+  align(j = 1, align = "left") |>
+  autofit() |>
+  theme_booktabs()
+
+
+```
+
+A sensitivity analysis was conducted to evaluate whether the addition of a province-level random intercept (three-level model) materially altered the fixed-effect estimates obtained from the preferred two-level specification (Table S2).
+
+Fixed-effect estimates were highly consistent across both specifications. The direction and magnitude of associations remained stable for all predictors, and confidence intervals largely overlapped between the two- and three-level models. No meaningful changes in statistical significance were observed, indicating that the main findings are robust to the inclusion of an additional level of spatial clustering.
+
+The two-level negative binomial model was therefore retained as the primary specification due to its parsimony and equivalent or better fit. The three-level model is presented as a robustness check confirming the stability of substantive conclusions.
+
+## Model Diagnostics
+
+**Figure S2.** DHARMa simulation-based residual diagnostics for the final two-level model. Panel A: QQ plot of scaled residuals against the theoretical uniform distribution. Panel B: Scaled residuals against model-predicted values.
+
+```{r dharma}
+#| label: supp-dharma
+#| fig-width: 10
+#| fig-height: 5
+#| warning: false
+#| echo: false
+
+set.seed(42)
+sim_res <- simulateResiduals(fittedModel = m3, n = 1000, plot = T)
+
+```
+
+DHARMa simulation-based diagnostics (Figure S2) indicated acceptable overall model fit with some residual patterns warranting acknowledgement.
+
+The QQ plot (**Panel A**) demonstrated close alignment of scaled residuals with the theoretical uniform diagonal across most of the distribution (KS test: D = `r round(ks_res$statistic, 3)`, p \< 0.001). Although statistically significant, this result is expected under large sample sizes where even negligible departures from uniformity achieve significance; the practical magnitude of the deviation is small, as visually confirmed by the tight clustering of points along the diagonal within the simulation envelope.
+
+Residuals plotted against fitted values (**Panel B**) revealed a strong concentration of observations at low predicted counts, consistent with the excess-zero, right-skewed nature of the count outcome. The LOESS smoother shows a mild U-shaped trajectory — dipping slightly below the 0.5 quantile line at intermediate fitted values before recovering — suggesting minor heterogeneity in residual distribution across the range of predicted counts.
+
+Taken together, the DHARMa diagnostics support the adequacy of the final two-level model for the data at hand.
